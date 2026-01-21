@@ -1,8 +1,8 @@
 {
   "scraper": {
-    "concurrent_requests": 45,
+    "concurrent_requests": 10,
     "retries_per_creative": 5,
-    "url_workers": 3,
+    "url_workers": 1,
     "proxy_url": "http://username:password@ip:port",
     "proxy_change_url": "http://username:password@ip:port"
   },
