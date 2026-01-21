@@ -1,0 +1,30 @@
+{
+  "scraper": {
+    "concurrent_requests": 45,
+    "retries_per_creative": 5,
+    "url_workers": 3,
+    "proxy_url": "http://username:password@ip:port",
+    "proxy_change_url": "http://username:password@ip:port"
+  },
+  "exporter": {
+    "max_retries": 5,
+    "exporter_workers": 20,
+    "details_filename": "Details.txt",
+    "transcription_filename": "Transcription.txt",
+    "video_filename": "Creative.mp4",
+    "image_filename": "Creative.jpg",
+    "results_base_dir": "Exporter_Results",
+    "retry_delay_seconds": 5,
+    "min_reaches": 0,
+    "min_reaches_eu": 0,
+    "min_reaches_uk": 0
+  },
+  "facebook_api": {
+    "endpoint_url": "https://www.facebook.com/api/graphql/",
+    "doc_ids": {
+      "pagination": "123456789",
+      "collation": "123456789",
+      "creative_info": "123456789"
+    }
+  }
+}
