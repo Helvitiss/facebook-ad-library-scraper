@@ -1,4 +1,23 @@
-.venv/
-.idea/
+# Result directories
 Exporter_Results/
 Parser_Results/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.env
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
