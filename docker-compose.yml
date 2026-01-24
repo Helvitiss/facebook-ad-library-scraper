@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    container_name: fb_scraper_bot
+    restart: always
+    volumes:
+      - .:/app
+      - /app/.venv  # Avoid mounting local venv into container
+      - /app/__pycache__ # Avoid mounting local cache
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Use .env file for sensitive data if needed, otherwise it picks up config.json
