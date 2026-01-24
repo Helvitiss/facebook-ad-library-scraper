@@ -15,7 +15,7 @@
     "image_filename": "Creative.jpg",
     "results_base_dir": "Exporter_Results",
     "retry_delay_seconds": 5,
-    "min_reaches": 7777,
+    "min_reaches": 1000,
     "min_reaches_eu": 0,
     "min_reaches_uk": 0
   },
@@ -30,6 +30,8 @@
   "telegram": {
     "token": "YOUR_BOT_TOKEN_HERE",
     "admin_ids": [
+      123456789,
+      123456789,
       123456789,
       123456789
     ]
