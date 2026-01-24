@@ -1,6 +1,6 @@
 {
   "scraper": {
-    "concurrent_requests": 10,
+    "concurrent_requests": 35,
     "retries_per_creative": 5,
     "url_workers": 1,
     "proxy_url": "http://username:password@ip:port",
@@ -26,5 +26,11 @@
       "collation": "123456789",
       "creative_info": "123456789"
     }
-  }
+  },
+  "video_extensions": [
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".mkv"
+  ]
 }
