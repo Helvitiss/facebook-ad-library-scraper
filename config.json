@@ -1,9 +1,9 @@
 {
   "scraper": {
-    "concurrent_requests": 35,
+    "concurrent_requests": 45,
     "retries_per_creative": 5,
-    "url_workers": 1,
-    "proxy_url": "http://username:password@ip:port",
+    "url_workers": 3,
+    "proxy_url": "",
     "proxy_change_url": "http://username:password@ip:port"
   },
   "exporter": {
@@ -15,7 +15,7 @@
     "image_filename": "Creative.jpg",
     "results_base_dir": "Exporter_Results",
     "retry_delay_seconds": 5,
-    "min_reaches": 0,
+    "min_reaches": 7777,
     "min_reaches_eu": 0,
     "min_reaches_uk": 0
   },
@@ -26,6 +26,13 @@
       "collation": "123456789",
       "creative_info": "123456789"
     }
+  },
+  "telegram": {
+    "token": "YOUR_BOT_TOKEN_HERE",
+    "admin_ids": [
+      123456789,
+      123456789
+    ]
   },
   "video_extensions": [
     ".mp4",
