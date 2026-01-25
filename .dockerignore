@@ -1,0 +1,14 @@
+.venv/
+venv/
+env/
+__pycache__/
+*.log
+Exporter_Results/
+Parser_Results/
+.git/
+.idea/
+.vscode/
+*.zip
+.DS_Store
+Dockerfile
+docker-compose.yml
