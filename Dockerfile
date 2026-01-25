@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install system dependencies for Playwright and Chromium
+# Install system dependencies manually (adapted for Debian/ARM/Raspberry Pi)
 RUN apt-get update && apt-get install -y \
     libnss3 \
     libnspr4 \
@@ -21,6 +21,10 @@ RUN apt-get update && apt-get install -y \
     libpango-1.0-0 \
     libcairo2 \
     libasound2 \
+    libxshmfence1 \
+    libglib2.0-0 \
+    fonts-liberation \
+    fonts-unifont \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
@@ -30,9 +34,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers (Chromium)
+# Install Playwright browsers (Chromium) - skip install-deps as we did it manually
 RUN playwright install chromium
-RUN playwright install-deps chromium
 
 # Copy the rest of the application
 COPY . .
@@ -41,3 +44,4 @@ COPY . .
 RUN mkdir -p Parser_Results Exporter_Results
 
 CMD ["python", "bot.py"]
+
