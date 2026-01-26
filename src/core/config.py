@@ -75,12 +75,31 @@ class Config:
                 raw_cfg = json.load(f)
             
             # Подстановка секретов из ENV (переменные окружения имеют приоритет)
-            if os.getenv("TG_TOKEN"):
-                raw_cfg.setdefault("telegram", {})["token"] = os.getenv("TG_TOKEN")
+            telegram_cfg = raw_cfg.setdefault("telegram", {})
+            scraper_cfg = raw_cfg.setdefault("scraper", {})
             
-            # Можно добавить другие переменные окружения при необходимости
-            # if os.getenv("PROXY_URL"):
-            #     raw_cfg.setdefault("scraper", {})["proxy_url"] = os.getenv("PROXY_URL")
+            # Токен
+            if os.getenv("TG_TOKEN"):
+                telegram_cfg["token"] = os.getenv("TG_TOKEN")
+            
+            # User IDs - ENV имеет приоритет
+            if os.getenv("TG_USER_IDS"):
+                user_ids_str = os.getenv("TG_USER_IDS")
+                user_ids = [int(uid.strip()) for uid in user_ids_str.split(",") if uid.strip()]
+                telegram_cfg["user_ids"] = user_ids
+            
+            # Owner IDs - ENV имеет приоритет
+            if os.getenv("TG_OWNER_IDS"):
+                owner_ids_str = os.getenv("TG_OWNER_IDS")
+                owner_ids = [int(oid.strip()) for oid in owner_ids_str.split(",") if oid.strip()]
+                telegram_cfg["owner_ids"] = owner_ids
+            
+            # Прокси
+            if os.getenv("PROXY_URL"):
+                scraper_cfg["proxy_url"] = os.getenv("PROXY_URL")
+            
+            if os.getenv("PROXY_CHANGE_URL"):
+                scraper_cfg["proxy_change_url"] = os.getenv("PROXY_CHANGE_URL")
 
             self.data = AppConfig(**raw_cfg)
             logger.debug("Configuration loaded and validated with Pydantic")
@@ -116,3 +135,7 @@ class Config:
     # Global instance
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 config_instance = Config(PROJECT_ROOT / "config.json")
+
+
+if __name__ == "__main__":
+    print(config_instance.data)

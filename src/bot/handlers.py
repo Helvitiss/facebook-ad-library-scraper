@@ -77,27 +77,35 @@ def get_main_settings_kb():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_section_kb(section: str):
-    with open(config.path, "r", encoding="utf-8") as f: cfg = json.load(f)
+    # Используем загруженную конфигурацию с учетом ENV
+    section_data = getattr(config.data, section, None)
+    if not section_data:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="settings_home")]
+        ])
     
-    data = cfg.get(section, {})
     buttons = []
     
     def fmt_val(v):
         s = str(v)
-        # Show only start of long values (like urls)
         return f"{s[:15]}..." if len(s) > 15 else s
 
+    # Получаем данные как словарь
+    if hasattr(section_data, 'model_dump'):
+        data = section_data.model_dump()
+    else:
+        data = section_data if isinstance(section_data, dict) else {}
+    
     for k, v in data.items():
-        if isinstance(v, dict): continue # Skip nested
+        # Пропускаем вложенные словари и токен
+        if isinstance(v, dict) or k == "token":
+            continue
         
-        # Determine button text
         alias = KEY_ALIASES.get(k, k)
         val_str = fmt_val(v)
-        
-        # Format: "Alias: Value"
         btn_text = f"{alias}: {val_str}"
         
-        # Use different callback for lists
+        # Разные callback для списков и обычных значений
         if isinstance(v, list):
              buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"set_list_menu:{section}:{k}")])
         else:
@@ -413,8 +421,15 @@ async def process_new_value(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("set_list_menu:"))
 async def cb_list_menu(callback: CallbackQuery):
     _, section, key = callback.data.split(":")
-    with open(config.path, "r", encoding="utf-8") as f: cfg = json.load(f)
-    items = cfg.get(section, {}).get(key, [])
+    
+    # Получаем данные из загруженной конфигурации
+    section_data = getattr(config.data, section, None)
+    if hasattr(section_data, 'model_dump'):
+        data = section_data.model_dump()
+    else:
+        data = section_data if isinstance(section_data, dict) else {}
+    
+    items = data.get(key, [])
     
     alias = KEY_ALIASES.get(key, key)
     text = f"📋 <b>{alias}</b>\nТекущий список:\n"
@@ -441,19 +456,64 @@ async def process_list_add(message: Message, state: FSMContext):
     section, key = data.get("section"), data.get("key")
     val_str = message.text.strip()
     
-    try: val = int(val_str) # Try int first for IDs
+    try: val = int(val_str)
     except: val = val_str
     
     try:
-        with open(config.path, "r", encoding="utf-8") as f: cfg = json.load(f)
-        current_list = cfg[section].get(key, [])
-        if val not in current_list:
-            current_list.append(val)
-            cfg[section][key] = current_list
-            config.save(cfg)
-            await message.answer(f"✅ Добавлено: <code>{val}</code>", parse_mode="HTML")
+        # Проверяем, управляется ли через ENV
+        is_env_managed = False
+        env_key = None
+        if section == "telegram" and key in ["user_ids", "owner_ids"]:
+            env_key = f"TG_{key.upper()}"
+            if os.getenv(env_key):
+                is_env_managed = True
+        
+        if is_env_managed:
+            # Обновляем .env файл
+            env_path = config.path.parent / ".env"
+            current_ids = [int(uid.strip()) for uid in os.getenv(env_key).split(",") if uid.strip()]
+            
+            if val not in current_ids:
+                current_ids.append(val)
+                # Обновляем .env
+                if env_path.exists():
+                    with open(env_path, "r", encoding="utf-8") as f:
+                        env_lines = f.readlines()
+                    
+                    # Обновляем нужную строку
+                    new_lines = []
+                    found = False
+                    for line in env_lines:
+                        if line.startswith(f"{env_key}="):
+                            new_lines.append(f"{env_key}={','.join(map(str, current_ids))}\n")
+                            found = True
+                        else:
+                            new_lines.append(line)
+                    
+                    if not found:
+                        new_lines.append(f"{env_key}={','.join(map(str, current_ids))}\n")
+                    
+                    with open(env_path, "w", encoding="utf-8") as f:
+                        f.writelines(new_lines)
+                    
+                    # Перезагружаем конфигурацию
+                    config.reload()
+                    await message.answer(f"✅ Добавлено в .env: <code>{val}</code>", parse_mode="HTML")
+                else:
+                    await message.answer("❌ Файл .env не найден")
+            else:
+                await message.answer(f"⚠️ Значение уже есть в списке.", parse_mode="HTML")
         else:
-            await message.answer(f"⚠️ Значение уже есть в списке.", parse_mode="HTML")
+            # Обновляем config.json
+            with open(config.path, "r", encoding="utf-8") as f: cfg = json.load(f)
+            current_list = cfg[section].get(key, [])
+            if val not in current_list:
+                current_list.append(val)
+                cfg[section][key] = current_list
+                config.save(cfg)
+                await message.answer(f"✅ Добавлено: <code>{val}</code>", parse_mode="HTML")
+            else:
+                await message.answer(f"⚠️ Значение уже есть в списке.", parse_mode="HTML")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
         
@@ -462,8 +522,15 @@ async def process_list_add(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("set_list_rm_menu:"))
 async def cb_list_rm_menu(callback: CallbackQuery):
     _, section, key = callback.data.split(":")
-    with open(config.path, "r", encoding="utf-8") as f: cfg = json.load(f)
-    items = cfg.get(section, {}).get(key, [])
+    
+    # Получаем данные из загруженной конфигурации
+    section_data = getattr(config.data, section, None)
+    if hasattr(section_data, 'model_dump'):
+        data = section_data.model_dump()
+    else:
+        data = section_data if isinstance(section_data, dict) else {}
+    
+    items = data.get(key, [])
     
     if not items:
         return await callback.answer("Список пуст", show_alert=True)
@@ -475,7 +542,6 @@ async def cb_list_rm_menu(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("set_list_rm:"))
 async def cb_list_rm(callback: CallbackQuery):
     parts = callback.data.split(":") 
-    # format: set_list_rm:section:key:value
     section, key = parts[1], parts[2]
     val_str = parts[3]
     
@@ -483,17 +549,56 @@ async def cb_list_rm(callback: CallbackQuery):
     except: val = val_str
     
     try:
-        with open(config.path, "r", encoding="utf-8") as f: cfg = json.load(f)
-        current_list = cfg[section].get(key, [])
-        if val in current_list:
-            current_list.remove(val)
-            cfg[section][key] = current_list
-            config.save(cfg)
-            # Update the menu immediately
-            await cb_list_rm_menu(callback) 
+        # Проверяем, управляется ли через ENV
+        is_env_managed = False
+        env_key = None
+        if section == "telegram" and key in ["user_ids", "owner_ids"]:
+            env_key = f"TG_{key.upper()}"
+            if os.getenv(env_key):
+                is_env_managed = True
+        
+        if is_env_managed:
+            # Обновляем .env файл
+            env_path = config.path.parent / ".env"
+            current_ids = [int(uid.strip()) for uid in os.getenv(env_key).split(",") if uid.strip()]
+            
+            if val in current_ids:
+                current_ids.remove(val)
+                # Обновляем .env
+                if env_path.exists():
+                    with open(env_path, "r", encoding="utf-8") as f:
+                        env_lines = f.readlines()
+                    
+                    new_lines = []
+                    for line in env_lines:
+                        if line.startswith(f"{env_key}="):
+                            new_lines.append(f"{env_key}={','.join(map(str, current_ids))}\n")
+                        else:
+                            new_lines.append(line)
+                    
+                    with open(env_path, "w", encoding="utf-8") as f:
+                        f.writelines(new_lines)
+                    
+                    # Перезагружаем конфигурацию
+                    config.reload()
+                    await cb_list_rm_menu(callback)
+                else:
+                    await callback.answer("❌ Файл .env не найден", show_alert=True)
+            else:
+                await callback.answer("Уже удалено", show_alert=True)
+                await cb_list_rm_menu(callback)
         else:
-            await callback.answer("Уже удалено", show_alert=True)
-            await cb_list_rm_menu(callback)
+            # Обновляем config.json
+            with open(config.path, "r", encoding="utf-8") as f: cfg = json.load(f)
+            current_list = cfg[section].get(key, [])
+            if val in current_list:
+                current_list.remove(val)
+                cfg[section][key] = current_list
+                config.save(cfg)
+                await cb_list_rm_menu(callback) 
+            else:
+                await callback.answer("Уже удалено", show_alert=True)
+                await cb_list_rm_menu(callback)
     except Exception as e:
         await callback.answer(f"Ошибка: {e}", show_alert=True)
 
