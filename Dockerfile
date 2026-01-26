@@ -43,5 +43,5 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p Parser_Results Exporter_Results
 
-CMD ["python", "bot.py"]
+CMD ["python", "main.py"]
 
