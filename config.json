@@ -1,6 +1,6 @@
 {
   "scraper": {
-    "concurrent_requests": 45,
+    "concurrent_requests": 44,
     "retries_per_creative": 5,
     "url_workers": 3,
     "proxy_url": "",
@@ -29,13 +29,14 @@
   },
   "telegram": {
     "token": "ENV_VAR",
-    "admin_ids": [
+    "user_ids": [
       123456789,
       123456789,
       123456789,
       123456789
     ],
     "owner_ids": [
+      123456789,
       123456789
     ]
   },

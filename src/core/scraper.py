@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any
 import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
-from playwright.async_api import async_playwright, Browser
+from playwright.async_api import async_playwright, Browser, Response
 
 from src.core.config import config_instance as config
 from src.core.models import GraphQLPage, Creative, AdGroup
@@ -87,17 +87,32 @@ class GraphQLClient:
         self.initial_variables = {}
 
     async def fetch_all_creatives(self, initial_page: GraphQLPage) -> list:
-        self.initial_variables = initial_page.variables.copy()
+        self.initial_variables = initial_page.variables.copy() if initial_page.variables else {}
         seen_ids, all_creatives = set(), []
+        
+        # Process initial page
         for chunk in initial_page.raw_creatives:
+            if not chunk: continue
             cid = chunk[0].get("collation_id") or chunk[0].get("ad_archive_id")
             if cid and cid not in seen_ids:
                 seen_ids.add(cid); all_creatives.append(chunk)
+                
+        logger.info(f"Начальная страница: найдено {len(all_creatives)} элементов")
+        
         next_page = initial_page
         while next_page.cursor:
             next_page = await self._fetch_next_page(next_page)
-            all_creatives.extend(next_page.raw_creatives)
-            logger.debug(f"Fetched from next page: {len(next_page.raw_creatives)} groups")
+            if next_page.raw_creatives:
+                count_before = len(all_creatives)
+                for chunk in next_page.raw_creatives:
+                    if not chunk: continue
+                    cid = chunk[0].get("collation_id") or chunk[0].get("ad_archive_id")
+                    if cid and cid not in seen_ids:
+                        seen_ids.add(cid); all_creatives.append(chunk)
+                logger.info(f"Подгружено скроллом. Всего сейчас: {len(all_creatives)}")
+            else:
+                logger.warning("Курсор есть, но новые объявления не найдены.")
+                
         return all_creatives
 
     async def _fetch_next_page(self, current_page: GraphQLPage) -> GraphQLPage:
@@ -112,7 +127,7 @@ class GraphQLClient:
                 data = resp.json()
                 return GraphQLPage(cursor=extract_cursor(data), raw_creatives=extract_creatives_from_pagination(data))
             except Exception as e:
-                logger.warning(f"Error fetching page (try {i+1}): {e}")
+                logger.warning(f"Ошибка получения страницы (попытка {i+1}): {e}")
         return GraphQLPage()
 
     async def fetch_all_creatives_from_collation(self, collation_id: str) -> list:
@@ -180,30 +195,71 @@ class Scraper:
     async def get_initial_data(self, browser: Browser, url: str) -> GraphQLPage:
         # browser is managed by caller for now
         page = await browser.new_page()
+        gql_responses = []
+
+        async def handle_response(response: Response):
+            if "graphql" in response.url and response.request.method == "POST":
+                try:
+                    # We only care about successful JSON responses
+                    if response.status == 200:
+                        gql_responses.append(response)
+                except:
+                    pass
+
+        # Listen to all responses
+        page.on("response", handle_response)
+        
         try:
             for i in range(3):
                 try:
+                    gql_responses.clear()
                     await page.goto(url, wait_until="networkidle", timeout=30000)
-                    async with page.expect_response("**/graphql/", timeout=30000) as resp_info:
-                        for _ in range(3):
-                            await page.evaluate("window.scrollBy(0, 800)"); await asyncio.sleep(0.8)
-                    resp = await resp_info.value
-                    data, req = await resp.json(), resp.request.post_data_json
-                    return GraphQLPage(cursor=extract_cursor(data), raw_creatives=extract_creatives(data), variables=extract_variables(req))
+                    # Scroll to trigger loading
+                    for _ in range(3):
+                        await page.evaluate("window.scrollBy(0, 800)"); await asyncio.sleep(0.8)
+                    
+                    # Wait a bit for pending requests
+                    await page.wait_for_timeout(2000)
+
+                    # Check collected responses
+                    
+                    for resp in gql_responses:
+                        try:
+                            data = await resp.json()
+                            raw = extract_creatives(data)
+                            if raw:
+                                try:
+                                    req_json = resp.request.post_data_json
+                                    vars_ = extract_variables(req_json)
+                                except: 
+                                    vars_ = None
+                                return GraphQLPage(cursor=extract_cursor(data), raw_creatives=raw, variables=vars_)
+                        except Exception as e:
+                            logger.debug(f"Failed to parse GQL resp: {e}")
+
                 except Exception as e:
-                    logger.warning(f"GraphQL attempt {i+1} failed: {e}")
+                    logger.warning(f"Attempt {i+1} failed: {e}")
+                
+                # Fallback to HTML
                 html = await page.content()
                 info = extract_script_info(html)
-                if info and (creatives := extract_creatives(info)):
-                    return GraphQLPage(raw_creatives=creatives)
+                if info:
+                    creatives = extract_creatives(info)
+                    if creatives:
+                        return GraphQLPage(raw_creatives=creatives)
+                        
             raise Exception("No creatives found.")
-        finally: await page.close()
+        finally:
+             # Process might crash if we don't remove listener? Playwright handles it on close, 
+             # but good practice to clear if reusable.
+             await page.close()
 
     async def process_creatives(self, client: GraphQLClient, raw_creatives: list) -> List[AdGroup]:
         processed_ids = set()
         async def _proc_chunk(chunk):
+            if not chunk: return None
             data = chunk[0]
-            if data.get("collation_count", 0) > 1:
+            if (data.get("collation_count") or 0) > 1:
                 group = AdGroup(link_url=data.get("snapshot", {}).get("link_url"), collation_id=data.get("collation_id"))
                 for i in range(5):
                     try:
@@ -228,9 +284,12 @@ class Scraper:
                                                       start_date=data.get("start_date"))])
             return None
         res = await asyncio.gather(*[_proc_chunk(c) for c in raw_creatives])
-        return [g for g in res if g and g.creatives]
+        final_groups = [g for g in res if g and g.creatives]
+        logger.success(f"Успешно обработано {len(final_groups)} групп объявлений")
+        return final_groups
 
     async def enrich_groups(self, groups: List[AdGroup], initial_vars: dict):
+        logger.info("Сбор деталей (прозрачность, гео, просмотры)...")
         creatives = [c for g in groups for c in g.creatives]
         pending = creatives
         while pending:
@@ -238,9 +297,12 @@ class Scraper:
             results, to_retry = await asyncio.gather(*tasks, return_exceptions=True), []
             for c, res in zip(pending, results):
                 if isinstance(res, RateLimitExceededError): to_retry.append(c)
-                elif isinstance(res, Exception): logger.error(f"Enrich error {c.ad_archive_id}: {res}")
+                elif isinstance(res, Exception): logger.error(f"Ошибка деталей {c.ad_archive_id}: {res}")
             pending = to_retry
         
+        # Aggregate reaches after enrichment
+        self._aggregate_reaches(groups)
+
         extractor = RSOCExtractor(proxy=self.proxy)
         await asyncio.gather(*[self._proc_rsoc(g, extractor) for g in groups if g.link_url])
 
@@ -256,7 +318,50 @@ class Scraper:
                             await self._change_proxy_ip(); raise RateLimitExceededError()
                         creative.transparency_data = res.get("data", {}); return
                 except (httpx.RequestError, RateLimitExceededError): pass
-            logger.error(f"Failed to enrich {creative.ad_archive_id}")
+            logger.error(f"Не удалось получить детали для {creative.ad_archive_id}")
+
+    def _aggregate_reaches(self, groups: List[AdGroup]):
+        for group in groups:
+            eu_map, uk_map = {}, {}
+            for c in group.creatives:
+                if not c.transparency_data: continue
+                
+                # Logic based on original code 'CreativesFilter.sum_reaches'
+                try:
+                    ad_details = c.transparency_data.get("ad_library_main", {}).get("ad_details", {})
+                    transparency = ad_details.get("transparency_by_location", {})
+                    
+                    if not transparency:
+                        # logger.debug(f"No transparency_by_location for {c.ad_archive_id}")
+                        continue
+
+                    for region_code in ("eu", "uk"):
+                        region_transparency = transparency.get(f"{region_code}_transparency")
+                        if not region_transparency: continue
+
+                        breakdown = region_transparency.get("age_country_gender_reach_breakdown", [])
+                        if not breakdown:
+                             # logger.debug(f"Detailed breakdown missing for {c.ad_archive_id} in {region_code}")
+                             continue
+
+                        for country_dict in breakdown:
+                            country = country_dict.get("country")
+                            if not country: continue
+
+                            # Sum male + female + unknown
+                            summary = 0
+                            for bd_item in country_dict.get("age_gender_breakdowns", []):
+                                summary += sum(bd_item.get(gender, 0) or 0 for gender in ("male", "female", "unknown"))
+                            
+                            if summary > 0:
+                                if region_code == "eu":
+                                    eu_map[country] = eu_map.get(country, 0) + summary
+                                else:
+                                    uk_map[country] = uk_map.get(country, 0) + summary
+                except Exception as e:
+                    logger.error(f"Ошибка парсинга статистики: {e}")
+
+            group.total_reaches = {"eu": eu_map, "uk": uk_map}
 
     async def _proc_rsoc(self, group: AdGroup, extractor: RSOCExtractor):
         async with self.enricher_semaphore:
@@ -273,7 +378,6 @@ async def main(urls: List[str] = None):
         for url in urls or []:
             init = await scraper.get_initial_data(browser, url)
             
-            # Here we must also respect the proxy when doing initial GQL fetch
             proxy_url = config.data.scraper.proxy_url or None
             
             async with httpx.AsyncClient(proxy=proxy_url) as client:

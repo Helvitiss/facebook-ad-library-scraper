@@ -36,7 +36,7 @@ class FacebookApiConfig(BaseModel):
 
 class TelegramConfig(BaseModel):
     token: str
-    admin_ids: List[int]
+    user_ids: List[int]
     owner_ids: List[int] = []
 
 class AppConfig(BaseModel):

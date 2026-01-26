@@ -32,24 +32,41 @@ class Exporter:
                 return
 
             for jf in json_files:
-                logger.info(f"Processing: {jf.name}")
+                logger.info(f"Обработка дампа: {jf.name}")
                 with open(jf, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 
-                # Assume structure: { "url": { "group_id": { ... } } }
+                if not data:
+                    logger.warning("Файл JSON пуст.")
+                    continue
+
+                # Structure: { "url": { "group_id": { ... } } }
+                # We need to count items
                 ad_data = next(iter(data.values()), {})
                 
+                count = len(ad_data)
+                logger.info(f"Найдено {count} объявлений в дампе.")
+                
+                if count == 0:
+                    logger.warning("Структура данных не содержит объявлений.")
+                    continue
+
                 with httpx.Client(follow_redirects=True, timeout=30) as client:
                     self.http_client = client
                     with ThreadPoolExecutor(max_workers=config.data.exporter.exporter_workers) as executor:
                         futures = [executor.submit(self._process_ad, url, details) for url, details in ad_data.items()]
+                        processed_count = 0
                         for future in as_completed(futures):
                             try:
                                 res = future.result()
-                                if res: logger.success(f"Exported: {res}")
-                            except Exception as e: logger.exception(f"Ad process error: {e}")
+                                if res: 
+                                    logger.success(f"Экспортировано: {Path(res).name}")
+                                    processed_count += 1
+                            except Exception as e: logger.exception(f"Ошибка обработки объявления: {e}")
+                        
+                        logger.info(f"Итого экспортировано {processed_count} из {count}.")
 
-            logger.info("Starting transcriptions...")
+            logger.info("Транскрибация видео...")
             self._process_transcriptions()
         finally:
             logger.remove(log_sink)
@@ -63,6 +80,8 @@ class Exporter:
         if (total < config.data.exporter.min_reaches or 
             eu_s < config.data.exporter.min_reaches_eu or 
             uk_s < config.data.exporter.min_reaches_uk):
+            # Debug log for skipped items
+            # logger.debug(f"Skipped {ad_url}: Reach {total} < Min {config.data.exporter.min_reaches}")
             return None
 
         folder_name = self._get_folder_name(reaches, data.get("ad_texts", []))
@@ -73,7 +92,15 @@ class Exporter:
         v_urls = list({u.split("oe=")[1].split('&')[0]: u for u in data.get("video_urls", []) if "oe=" in u}.values()) if data.get("video_urls") else data.get("video_urls", [])
         i_urls = data.get("img_urls", [])
         
-        for idx, url in enumerate(v_urls + i_urls, 1):
+        media_urls = v_urls + i_urls
+        if not media_urls:
+            logger.warning(f"Медиа-файлы не найдены для {ad_url}")
+            # Still return path to indicate it was processed? Or skip?
+            # If we return None, it won't be counted as exported.
+            # But details are saved. Let's return path.
+            return str(path)
+
+        for idx, url in enumerate(media_urls, 1):
             m_path = path / f"Creative #{idx}"
             m_path.mkdir(exist_ok=True)
             if url in v_urls: self._download(url, m_path / config.data.exporter.video_filename)
@@ -90,7 +117,7 @@ class Exporter:
                         for chunk in r.iter_bytes(): f.write(chunk)
                 return
             except Exception as e:
-                logger.warning(f"Download failed (try {i+1}): {e}")
+                logger.warning(f"Ошибка загрузки (попытка {i+1}): {e}")
                 if i < config.data.exporter.max_retries - 1: time.sleep(config.data.exporter.retry_delay_seconds)
 
     def _save_details(self, path: Path, url: str, data: dict, eu_s, uk_s, total):
@@ -100,11 +127,14 @@ class Exporter:
                 f.write(f"--- Text #{i} ---\n{t}\n")
             
             s_date = datetime.fromtimestamp(data["start_date"]).strftime("%Y-%m-%d") if data.get("start_date") else "N/A"
-            f.write(f"\nMetadata:\nStart: {s_date}\nSpend: ${(total/1000)*5:.2f}\n")
+            f.write(f"\nMetadata:\nStart: {s_date}\nSpend: ${(total/1000)*10:.2f}\n")
             f.write(f"\nReaches:\nTotal: {total}\nEU: {eu_s}\nUK: {uk_s}\n")
             
             def _w_r(label, r_data):
                 f.write(f"\n[{label}]\n")
+                if not r_data:
+                    f.write("-\n")
+                    return
                 for c, r in sorted(r_data.items(), key=lambda x: x[1], reverse=True):
                     name = pycountry.countries.get(alpha_2=c).name if pycountry.countries.get(alpha_2=c) else c
                     f.write(f"{name}: {r}\n")
@@ -140,8 +170,11 @@ class Exporter:
     def _process_transcriptions(self):
         model = WhisperModel("base", device="cpu", compute_type="int8")
         videos = [f for f in self.results_dir.rglob("*") if f.suffix.lower() in config.data.video_extensions and f.stat().st_size > 1024]
-        if not videos: return
+        if not videos: 
+            logger.info("Видео для транскрибации не найдено.")
+            return
         
+        logger.info(f"Обработка {len(videos)} видео для транскрибации...")
         with ThreadPoolExecutor(max_workers=config.data.exporter.exporter_workers) as executor:
             [executor.submit(self._transcribe, v, model) for v in videos]
 
@@ -152,7 +185,7 @@ class Exporter:
             trans = GoogleTranslator(source='auto', target='en').translate(text)
             with open(path.parent / config.data.exporter.transcription_filename, "w", encoding="utf-8") as f:
                 f.write(f"Original:\n{text}\n\nTranslation:\n{trans}")
-        except Exception as e: logger.error(f"Transcribe error {path.name}: {e}")
+        except Exception as e: logger.error(f"Ошибка транскрибации {path.name}: {e}")
 
 async def main(input_path: str | Path):
     await Exporter().run(input_path)
