@@ -143,20 +143,24 @@ class GraphQLClient:
 
 class Scraper:
     def __init__(self):
-        self.enricher_semaphore = asyncio.Semaphore(config.CONCURRENT_REQUESTS)
+        self.enricher_semaphore = asyncio.Semaphore(config.data.scraper.concurrent_requests)
+
+    @property
+    def proxy(self):
+        return config.data.scraper.proxy_url or None
 
     async def _get_external_ip(self) -> Optional[str]:
-        if not config.PROXY: return "Local IP"
+        if not self.proxy: return "Local IP"
         for ep in ["http://checkip.amazonaws.com", "http://ipinfo.io/ip"]:
             try:
-                async with httpx.AsyncClient(timeout=15, proxy=config.PROXY) as client:
+                async with httpx.AsyncClient(timeout=15, proxy=self.proxy) as client:
                     resp = await client.get(ep)
                     if resp.status_code == 200: return resp.text.strip()
             except: pass
         return None
 
     async def _change_proxy_ip(self) -> Optional[str]:
-        if not config.PROXY_CHANGE_URL or not config.PROXY: return None
+        if not config.data.scraper.proxy_change_url or not self.proxy: return None
         if not config.IP_READY_EVENT.is_set():
             await config.IP_READY_EVENT.wait(); return config.LAST_PROXY_IP
         async with config.IP_CHANGE_LOCK:
@@ -164,7 +168,7 @@ class Scraper:
             try:
                 old_ip = await self._get_external_ip()
                 for i in range(5):
-                    try: httpx.get(config.PROXY_CHANGE_URL, timeout=30)
+                    try: httpx.get(config.data.scraper.proxy_change_url, timeout=30)
                     except: pass
                     await asyncio.sleep(5)
                     new_ip = await self._get_external_ip()
@@ -174,6 +178,7 @@ class Scraper:
             finally: config.IP_READY_EVENT.set()
 
     async def get_initial_data(self, browser: Browser, url: str) -> GraphQLPage:
+        # browser is managed by caller for now
         page = await browser.new_page()
         try:
             for i in range(3):
@@ -236,15 +241,15 @@ class Scraper:
                 elif isinstance(res, Exception): logger.error(f"Enrich error {c.ad_archive_id}: {res}")
             pending = to_retry
         
-        extractor = RSOCExtractor(proxy=config.PROXY)
+        extractor = RSOCExtractor(proxy=self.proxy)
         await asyncio.gather(*[self._proc_rsoc(g, extractor) for g in groups if g.link_url])
 
     async def _enrich_one(self, creative: Creative, initial_vars: dict):
         async with self.enricher_semaphore:
-            for i in range(config.RETRIES_PER_CREATIVE):
+            for i in range(config.data.scraper.retries_per_creative):
                 try:
-                    async with httpx.AsyncClient(timeout=60, proxy=config.PROXY) as client:
-                        gql = GraphQLClient(client, config.ENDPOINT_URL, config.DOC_IDS)
+                    async with httpx.AsyncClient(timeout=60, proxy=self.proxy) as client:
+                        gql = GraphQLClient(client, config.data.facebook_api.endpoint_url, config.data.facebook_api.doc_ids)
                         gql.initial_variables = initial_vars
                         res = await gql.fetch_creative_info(creative.ad_archive_id)
                         if "Rate limit exceeded" in str(res):
@@ -267,8 +272,12 @@ async def main(urls: List[str] = None):
         
         for url in urls or []:
             init = await scraper.get_initial_data(browser, url)
-            async with httpx.AsyncClient(proxy=config.PROXY) as client:
-                gql = GraphQLClient(client, config.ENDPOINT_URL, config.DOC_IDS)
+            
+            # Here we must also respect the proxy when doing initial GQL fetch
+            proxy_url = config.data.scraper.proxy_url or None
+            
+            async with httpx.AsyncClient(proxy=proxy_url) as client:
+                gql = GraphQLClient(client, config.data.facebook_api.endpoint_url, config.data.facebook_api.doc_ids)
                 raw = await gql.fetch_all_creatives(init)
                 groups = await scraper.process_creatives(gql, raw)
                 await scraper.enrich_groups(groups, gql.initial_variables)

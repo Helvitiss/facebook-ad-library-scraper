@@ -28,7 +28,7 @@
     }
   },
   "telegram": {
-    "token": "YOUR_BOT_TOKEN_HERE",
+    "token": "ENV_VAR",
     "admin_ids": [
       123456789,
       123456789,

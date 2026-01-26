@@ -8,35 +8,78 @@ import shutil
 import os
 import json
 import html
-import re
+import asyncio
 
 from src.core.config import config_instance as config
 from src.core.scraper import main as scraper_main
 from src.core.exporter import main as exporter_main
 
 router = Router()
+queue = asyncio.Queue()
 
-def is_owner(user_id: int) -> bool: return user_id in config.OWNER_IDS
-def is_admin(user_id: int) -> bool: return is_owner(user_id) or not config.ADMIN_IDS or user_id in config.ADMIN_IDS
+def is_owner(user_id: int) -> bool: return user_id in config.data.telegram.owner_ids
+def is_admin(user_id: int) -> bool: return is_owner(user_id) or not config.data.telegram.admin_ids or user_id in config.data.telegram.admin_ids
+
+async def worker():
+    logger.info("Task queue worker started")
+    while True:
+        message, url = await queue.get()
+        try:
+            await process_task(message, url)
+        except Exception as e:
+            logger.exception(f"Worker process error: {e}")
+        finally:
+            queue.task_done()
+
+async def process_task(message: Message, url: str):
+    status = await message.answer("🚀 Запуск обработки (из очереди)...")
+    try:
+        await status.edit_text("🛰 Сбор данных...")
+        res_dir = await scraper_main([url])
+        if not res_dir:
+            return await status.edit_text("❌ Нет результатов.")
+
+        await status.edit_text("📥 Загрузка и транскрибация...")
+        await exporter_main(res_dir)
+
+        await status.edit_text("📦 Упаковка...")
+        exp_base = Path(config.data.exporter.results_base_dir)
+        subdirs = [d for d in exp_base.iterdir() if d.is_dir()]
+        if not subdirs:
+             return await status.edit_text("❌ Ошибка экспорта (нет папок).")
+             
+        latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+        zip_name = f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        shutil.make_archive(zip_name, 'zip', latest)
+        zip_file = zip_name + ".zip"
+
+        await status.edit_text("📤 Отправка...")
+        await message.reply_document(document=FSInputFile(zip_file), caption=f"✅ Готово для:\n{url}")
+        
+        try:
+            os.remove(zip_file)
+            shutil.rmtree(res_dir)
+            shutil.rmtree(latest)
+        except: pass
+        await status.delete()
+    except Exception as e:
+        logger.exception(f"Task processing error for {url}")
+        await message.answer(f"❌ Ошибка обработки: {e}")
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     if not is_admin(message.from_user.id): return
     await message.answer(
-        "👋 Привет! Я бот для парсинга Facebook Ad Library.\n\n"
-        "Отправь мне ссылку, и я соберу все данные.\n\n"
-        "Команды:\n/settings - Настройки\n/set <ключ> <значение> - Изменить\n/cleanup - Очистка"
+        "👋 Бот готов. Отправь ссылку Facebook Ad Library.\n"
+        "Задачи ставятся в очередь во избежание перегрузки."
     )
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message):
     if not is_admin(message.from_user.id): return
     is_owner_user = is_owner(message.from_user.id)
-    
     with open(config.path, "r", encoding="utf-8") as f: cfg = json.load(f)
-    
     def mask(t): return f"{t[:4]}...{t[-4:]}" if t and len(t) > 10 else "********"
-    
     text = "⚙️ <b>Настройки:</b>\n\n"
     for sec, data in cfg.items():
         if not is_owner_user and sec in ["telegram", "facebook_api"]: continue
@@ -54,15 +97,12 @@ async def cmd_set(message: Message):
     if not is_admin(message.from_user.id): return
     args = message.text.split(maxsplit=2)
     if len(args) < 3: return await message.answer("Использование: `/set <ключ> <значение>`", parse_mode="Markdown")
-    
     key, val_str = args[1], args[2]
     if any(key.startswith(p) for p in ["telegram", "facebook_api"]) and not is_owner(message.from_user.id):
         return await message.answer("❌ Нет прав.")
-
     try:
         try: val = json.loads(val_str)
         except: val = val_str
-        
         with open(config.path, "r", encoding="utf-8") as f: cfg = json.load(f)
         keys = key.split('.')
         curr = cfg
@@ -76,7 +116,7 @@ async def cmd_set(message: Message):
 async def cmd_cleanup(message: Message):
     if not is_admin(message.from_user.id): return
     count = 0
-    for d in [config.RESULTS_BASE_DIR, "Parser_Results"]:
+    for d in [config.data.exporter.results_base_dir, "Parser_Results"]:
         p = Path(d)
         if p.exists():
             for item in p.iterdir():
@@ -91,32 +131,15 @@ async def cmd_cleanup(message: Message):
 async def handle_url(message: Message):
     if not is_admin(message.from_user.id): return
     url = message.text.strip()
-    status = await message.answer("🚀 Начинаю парсинг...")
     
-    try:
-        await status.edit_text("🛰 Сбор данных...")
-        res_dir = await scraper_main([url])
-        if not res_dir: return await status.edit_text("❌ Нет результатов.")
+    q_size = queue.qsize()
+    await queue.put((message, url))
+    
+    if q_size > 0:
+        await message.answer(f"⏳ Добавлено в очередь. Перед вами задач: {q_size}")
+    else:
+        await message.answer("⏳ Добавлено в очередь. Скоро начнем...")
 
-        await status.edit_text("📥 Загрузка и транскрибация...")
-        await exporter_main(res_dir)
-
-        await status.edit_text("📦 Упаковка...")
-        exp_base = Path(config.RESULTS_BASE_DIR)
-        latest = max([d for d in exp_base.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime)
-        zip_name = f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        shutil.make_archive(zip_name, 'zip', latest)
-        zip_file = zip_name + ".zip"
-
-        await status.edit_text("📤 Отправка...")
-        await message.reply_document(document=FSInputFile(zip_file), caption=f"✅ Готово для:\n{url}")
-        
-        try:
-            os.remove(zip_file)
-            shutil.rmtree(res_dir)
-            shutil.rmtree(latest)
-        except: pass
-        await status.delete()
-    except Exception as e:
-        logger.exception("Bot error")
-        await message.answer(f"❌ Ошибка: {e}")
+# Helper to start worker from main
+async def start_worker():
+    asyncio.create_task(worker())

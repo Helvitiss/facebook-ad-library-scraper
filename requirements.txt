@@ -61,3 +61,5 @@ typing_extensions==4.15.0
 urllib3==2.6.3
 win32_setctime==1.2.0
 yarl==1.22.0
+python-dotenv
+pydantic-settings

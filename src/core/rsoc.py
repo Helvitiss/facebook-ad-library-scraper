@@ -11,8 +11,6 @@ import pycountry
 import geonamescache
 from loguru import logger
 
-from src.core.config import config_instance as config
-
 class RSOCExtractor:
     # High-confidence keys that usually contain search phrases
     SEARCH_KEYS = {

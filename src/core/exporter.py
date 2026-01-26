@@ -41,7 +41,7 @@ class Exporter:
                 
                 with httpx.Client(follow_redirects=True, timeout=30) as client:
                     self.http_client = client
-                    with ThreadPoolExecutor(max_workers=config.EXPORTER_WORKERS) as executor:
+                    with ThreadPoolExecutor(max_workers=config.data.exporter.exporter_workers) as executor:
                         futures = [executor.submit(self._process_ad, url, details) for url, details in ad_data.items()]
                         for future in as_completed(futures):
                             try:
@@ -60,7 +60,9 @@ class Exporter:
         uk_s = sum(reaches.get("uk", {}).values())
         total = eu_s + uk_s
 
-        if total < config.MIN_REACHES or eu_s < config.MIN_REACHES_EU or uk_s < config.MIN_REACHES_UK:
+        if (total < config.data.exporter.min_reaches or 
+            eu_s < config.data.exporter.min_reaches_eu or 
+            uk_s < config.data.exporter.min_reaches_uk):
             return None
 
         folder_name = self._get_folder_name(reaches, data.get("ad_texts", []))
@@ -74,13 +76,13 @@ class Exporter:
         for idx, url in enumerate(v_urls + i_urls, 1):
             m_path = path / f"Creative #{idx}"
             m_path.mkdir(exist_ok=True)
-            if url in v_urls: self._download(url, m_path / config.VIDEO_FILENAME)
-            else: self._download(url, m_path / config.IMAGE_FILENAME)
+            if url in v_urls: self._download(url, m_path / config.data.exporter.video_filename)
+            else: self._download(url, m_path / config.data.exporter.image_filename)
         
         return str(path)
 
     def _download(self, url: str, path: Path):
-        for i in range(config.MAX_RETRIES):
+        for i in range(config.data.exporter.max_retries):
             try:
                 with self.http_client.stream("GET", url) as r:
                     r.raise_for_status()
@@ -89,10 +91,10 @@ class Exporter:
                 return
             except Exception as e:
                 logger.warning(f"Download failed (try {i+1}): {e}")
-                if i < config.MAX_RETRIES - 1: time.sleep(config.RETRY_DELAY_SECONDS)
+                if i < config.data.exporter.max_retries - 1: time.sleep(config.data.exporter.retry_delay_seconds)
 
     def _save_details(self, path: Path, url: str, data: dict, eu_s, uk_s, total):
-        with open(path / config.DETAILS_FILENAME, "w", encoding="utf-8") as f:
+        with open(path / config.data.exporter.details_filename, "w", encoding="utf-8") as f:
             f.write(f"Link: {url}\n\nTexts:\n")
             for i, t in enumerate(data.get("ad_texts", []), 1):
                 f.write(f"--- Text #{i} ---\n{t}\n")
@@ -126,7 +128,7 @@ class Exporter:
         return f"{summary}EU_{eu_s} UK_{uk_s} Total_{eu_s+uk_s}"
 
     def _create_results_dir(self):
-        self.results_dir = Path(__file__).parent.parent.parent / config.RESULTS_BASE_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.results_dir = Path(__file__).parent.parent.parent / config.data.exporter.results_base_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
     def _create_creative_folder(self, name: str) -> Path:
@@ -137,10 +139,10 @@ class Exporter:
 
     def _process_transcriptions(self):
         model = WhisperModel("base", device="cpu", compute_type="int8")
-        videos = [f for f in self.results_dir.rglob("*") if f.suffix.lower() in config.VIDEO_EXTENSIONS and f.stat().st_size > 1024]
+        videos = [f for f in self.results_dir.rglob("*") if f.suffix.lower() in config.data.video_extensions and f.stat().st_size > 1024]
         if not videos: return
         
-        with ThreadPoolExecutor(max_workers=config.EXPORTER_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=config.data.exporter.exporter_workers) as executor:
             [executor.submit(self._transcribe, v, model) for v in videos]
 
     def _transcribe(self, path: Path, model: WhisperModel):
@@ -148,7 +150,7 @@ class Exporter:
             segments, _ = model.transcribe(str(path))
             text = "\n".join(s.text.strip() for s in segments)
             trans = GoogleTranslator(source='auto', target='en').translate(text)
-            with open(path.parent / config.TRANSCRIPTION_FILENAME, "w", encoding="utf-8") as f:
+            with open(path.parent / config.data.exporter.transcription_filename, "w", encoding="utf-8") as f:
                 f.write(f"Original:\n{text}\n\nTranslation:\n{trans}")
         except Exception as e: logger.error(f"Transcribe error {path.name}: {e}")
 
