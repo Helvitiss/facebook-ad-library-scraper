@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
 from loguru import logger
 
-# --- Pydantic Models ---
+# --- Модели Pydantic для валидации конфигурации ---
 
 class ScraperConfig(BaseModel):
     concurrent_requests: int = 45
@@ -46,22 +46,22 @@ class AppConfig(BaseModel):
     telegram: TelegramConfig
     video_extensions: List[str]
 
-# --- Config Class ---
+# --- Класс управления конфигурацией ---
 
 class Config:
     def __init__(self, config_path: str | Path):
         self.path = Path(config_path).resolve()
         
-        # Runtime State
+        # Состояние для управления прокси
         self.IP_READY_EVENT = asyncio.Event()
         self.IP_READY_EVENT.set()
         self.IP_CHANGE_LOCK = asyncio.Lock()
         self.LAST_PROXY_IP: Optional[str] = None
         
-        # Helper to expose the pydantic model
+        # Валидированная конфигурация
         self.data: Optional[AppConfig] = None
         
-        # Load env vars
+        # Загрузка переменных окружения
         load_dotenv(self.path.parent / ".env")
         self.reload()
 
@@ -69,17 +69,16 @@ class Config:
         try:
             if not self.path.exists():
                 logger.error(f"Config file not found: {self.path}")
-                # Create default dummy config to prevent crash if needed, or just fail
                 return
 
             with open(self.path, "r", encoding="utf-8") as f:
                 raw_cfg = json.load(f)
             
-            # Inject ENV secrets (Env vars override config.json)
+            # Подстановка секретов из ENV (переменные окружения имеют приоритет)
             if os.getenv("TG_TOKEN"):
                 raw_cfg.setdefault("telegram", {})["token"] = os.getenv("TG_TOKEN")
             
-            # You can add more env overrides here if needed
+            # Можно добавить другие переменные окружения при необходимости
             # if os.getenv("PROXY_URL"):
             #     raw_cfg.setdefault("scraper", {})["proxy_url"] = os.getenv("PROXY_URL")
 
@@ -88,8 +87,7 @@ class Config:
         
         except ValidationError as e:
             logger.error(f"❌ Configuration Validation Error:\n{e}")
-            # We don't raise here to allow the bot to start and maybe log the error, 
-            # but in production, you might want to crash.
+            # Не прерываем работу, чтобы можно было увидеть ошибку
         except Exception as e:
             logger.error(f"Error loading config: {e}")
 

@@ -20,16 +20,16 @@ from src.core.exporter import main as exporter_main
 router = Router()
 queue = asyncio.Queue()
 
-# --- Helpers ---
+# --- Вспомогательные функции ---
 def is_owner(user_id: int) -> bool: return user_id in config.data.telegram.owner_ids
 def is_user(user_id: int) -> bool: return is_owner(user_id) or not config.data.telegram.user_ids or user_id in config.data.telegram.user_ids
 
-# --- FSM States ---
+# --- Состояния FSM ---
 class SettingsState(StatesGroup):
     waiting_for_value = State()
     waiting_for_list_add = State()
 
-# --- Constants & Aliases ---
+# --- Константы и псевдонимы для настроек ---
 KEY_ALIASES = {
     # Scraper
     "concurrent_requests": "Потоки (запросы)",
@@ -60,10 +60,10 @@ KEY_ALIASES = {
 }
 
 SECTION_ALIASES = {
-    "scraper": "🕷 Парсер",
-    "exporter": "📦 Экспортер",
-    "telegram": "✈️ Telegram",
-    "facebook_api": "⚙️ Facebook API"
+    "scraper": "Парсер",
+    "exporter": "Экспортер",
+    "telegram": "Telegram",
+    "facebook_api": "Facebook API"
 }
 
 # --- Keyboards ---
@@ -193,12 +193,113 @@ async def process_task(original_message: Message, status_message: Message, url: 
              return await status_message.edit_text("❌ Ошибка экспорта (нет папок).")
         
         latest = max(subdirs, key=lambda d: d.stat().st_mtime)
-        zip_name = f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # Generate summary and determine top domain for naming
+        from urllib.parse import urlparse
+        from collections import defaultdict
+        import httpx
+        
+        domain_stats = defaultdict(lambda: {"reach": 0, "spend": 0.0})
+        
+        async def get_final_domain(url: str) -> str:
+            """Follow redirects and return final domain"""
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+                    response = await client.head(url, follow_redirects=True)
+                    final_url = str(response.url)
+                    parsed = urlparse(final_url)
+                    domain = parsed.netloc
+                    # Remove www. prefix
+                    if domain.startswith('www.'):
+                        domain = domain[4:]
+                    return domain if domain else url
+            except:
+                # Fallback to parsing original URL
+                try:
+                    parsed = urlparse(url)
+                    domain = parsed.netloc
+                    if domain.startswith('www.'):
+                        domain = domain[4:]
+                    return domain if domain else url
+                except:
+                    return url
+        
+        for folder in latest.iterdir():
+            if not folder.is_dir(): continue
+            details_file = folder / config.data.exporter.details_filename
+            if not details_file.exists(): continue
+            
+            try:
+                with open(details_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                
+                # Extract link (first line after "Link: ")
+                link_match = re.search(r'Link:\s*(.+)', content)
+                if not link_match: continue
+                link = link_match.group(1).strip()
+                
+                # Get final domain by following redirects
+                domain = await get_final_domain(link)
+                
+                if not domain or domain == "N/A":
+                    continue
+                
+                # Extract reaches
+                reach_match = re.search(r'Total:\s*(\d+)', content)
+                reach = int(reach_match.group(1)) if reach_match else 0
+                
+                # Extract spend
+                spend_match = re.search(r'Spend:\s*\$([0-9.]+)', content)
+                spend = float(spend_match.group(1)) if spend_match else 0.0
+                
+                # Aggregate by domain
+                domain_stats[domain]["reach"] += reach
+                domain_stats[domain]["spend"] += spend
+                
+            except Exception as e:
+                logger.debug(f"Error parsing {details_file}: {e}")
+                continue
+        
+        # Find top domain by reach
+        top_domain = max(domain_stats.items(), key=lambda x: x[1]["reach"])[0] if domain_stats else "results"
+        # Sanitize domain for filename
+        safe_domain = re.sub(r'[^\w\-.]', '_', top_domain)
+        
+        zip_name = f"{safe_domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         shutil.make_archive(zip_name, 'zip', latest)
         zip_file = zip_name + ".zip"
 
         await status_message.edit_text("📤 Отправка...")
-        await original_message.reply_document(document=FSInputFile(zip_file), caption=f"✅ Готово для:\n{url}")
+        
+        # Build summary
+        summary_lines = ["✅ <b>Результаты обработки:</b>\n"]
+        total_reach = 0
+        total_spend = 0.0
+        
+        for domain, stats in sorted(domain_stats.items(), key=lambda x: x[1]["reach"], reverse=True):
+            summary_lines.append(f"🔗 <code>{domain}</code>")
+            summary_lines.append(f"   Spend: ${stats['spend']:.2f}")
+            summary_lines.append(f"   Reaches: {stats['reach']:,}\n")
+            total_reach += stats["reach"]
+            total_spend += stats["spend"]
+        
+        summary_lines.append(f"<b>Итого:</b>")
+        summary_lines.append(f"💰 Spend: ${total_spend:.2f}")
+        summary_lines.append(f"👁 Reaches: {total_reach:,}")
+        
+        caption = "\n".join(summary_lines)
+        
+        # Telegram caption limit is 1024 characters
+        if len(caption) > 1024:
+            # Send summary as separate message instead
+            await original_message.answer(caption, parse_mode="HTML")
+            caption = f"✅ Результаты обработки\n💰 Total Spend: ${total_spend:.2f}\n👁 Total Reaches: {total_reach:,}"
+        
+        await original_message.reply_document(
+            document=FSInputFile(zip_file), 
+            caption=caption,
+            parse_mode="HTML"
+        )
         
         try:
             os.remove(zip_file)

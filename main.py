@@ -3,11 +3,12 @@ from aiogram import Bot, Dispatcher
 from loguru import logger
 import sys
 
-# Ensure src is in path if running from root
+# Импорт конфигурации и обработчиков
 from src.core.config import config_instance as config
 from src.bot.handlers import router, start_worker
 
 async def main():
+    # Настройка логирования
     logger.remove()
     logger.add(sys.stdout, colorize=True, format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>")
     
@@ -16,14 +17,19 @@ async def main():
         return
 
     bot = Bot(token=config.data.telegram.token)
-    dp = Dispatcher()
+    
+    # Используем MemoryStorage для FSM и включаем параллельную обработку
+    from aiogram.fsm.storage.memory import MemoryStorage
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
     dp.include_router(router)
     
-    # Start the background task worker
+    # Запуск фонового воркера для очереди задач
     await start_worker()
 
     logger.info("Bot started!")
-    await dp.start_polling(bot)
+    # Разрешаем параллельную обработку обновлений
+    await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
     try:
