@@ -9,6 +9,7 @@ import os
 import json
 import html
 import asyncio
+import re
 
 from src.core.config import config_instance as config
 from src.core.scraper import main as scraper_main
@@ -19,6 +20,52 @@ queue = asyncio.Queue()
 
 def is_owner(user_id: int) -> bool: return user_id in config.data.telegram.owner_ids
 def is_admin(user_id: int) -> bool: return is_owner(user_id) or not config.data.telegram.admin_ids or user_id in config.data.telegram.admin_ids
+
+class TelegramLogHandler:
+    def __init__(self, message: Message):
+        self.message = message
+        self.loop = asyncio.get_running_loop()
+        self.last_text = ""
+        
+    def write(self, log_record):
+        # We need to run async edit in the event loop from the sync loguru call
+        asyncio.run_coroutine_threadsafe(self.update_message(log_record), self.loop)
+
+    async def update_message(self, log_record):
+        try:
+            # Clean ANSI codes if any (though loguru usually strips them for sinks unless requested)
+            text = log_record
+            clean_text = re.sub(r'<.*?>', '', text).strip() # Simple strip just in case
+            
+            # Extract level name often formatted like "INFO     | Message"
+            # But here log_record is the formatted string from loguru
+            
+            emoji = "📝"
+            if "INFO" in clean_text: emoji = "ℹ️"
+            elif "SUCCESS" in clean_text: emoji = "✅"
+            elif "WARNING" in clean_text: emoji = "⚠️"
+            elif "ERROR" in clean_text: emoji = "❌"
+            elif "DEBUG" in clean_text: emoji = "🐞"
+            
+            # Simple formatting: remove timestamp/level for the chat message to keep it short
+            # Regex to match default format "{time} | {level} | {message}"
+            # Look for the last pipe
+            parts = clean_text.split('|')
+            if len(parts) > 1:
+                content = parts[-1].strip()
+            else:
+                content = clean_text
+
+            new_text = f"{emoji} {content}"
+            
+            # Debounce: avoid editing if text hasn't changed meaningfully
+            if new_text == self.last_text: return
+            self.last_text = new_text
+
+            # Aiogram message edit
+            await self.message.edit_text(new_text)
+        except Exception:
+            pass # Ignore errors during log update to not crash the main process
 
 async def worker():
     logger.info("Task queue worker started")
@@ -33,9 +80,20 @@ async def worker():
 
 async def process_task(message: Message, url: str):
     status = await message.answer("🚀 Запуск обработки (из очереди)...")
+    
+    # Setup Log Handler
+    tg_handler = TelegramLogHandler(status)
+    sink_id = logger.add(
+        tg_handler.write,
+        format="{level} | {message}", # Simple format for parsing
+        level="INFO",
+        filter=lambda record: "aiogram" not in record["name"]
+    )
+    
     try:
         await status.edit_text("🛰 Сбор данных...")
         res_dir = await scraper_main([url])
+        
         if not res_dir:
             return await status.edit_text("❌ Нет результатов.")
 
@@ -45,9 +103,11 @@ async def process_task(message: Message, url: str):
         await status.edit_text("📦 Упаковка...")
         exp_base = Path(config.data.exporter.results_base_dir)
         subdirs = [d for d in exp_base.iterdir() if d.is_dir()]
+        
+        # Determine strict latest logic using modification time
         if not subdirs:
              return await status.edit_text("❌ Ошибка экспорта (нет папок).")
-             
+        
         latest = max(subdirs, key=lambda d: d.stat().st_mtime)
         zip_name = f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         shutil.make_archive(zip_name, 'zip', latest)
@@ -62,9 +122,13 @@ async def process_task(message: Message, url: str):
             shutil.rmtree(latest)
         except: pass
         await status.delete()
+        
     except Exception as e:
         logger.exception(f"Task processing error for {url}")
         await message.answer(f"❌ Ошибка обработки: {e}")
+    finally:
+        # Remove the sink so subsequent logs don't try to edit this old message
+        logger.remove(sink_id)
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -140,6 +204,5 @@ async def handle_url(message: Message):
     else:
         await message.answer("⏳ Добавлено в очередь. Скоро начнем...")
 
-# Helper to start worker from main
 async def start_worker():
     asyncio.create_task(worker())
