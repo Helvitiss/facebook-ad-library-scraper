@@ -61,8 +61,9 @@ class Exporter:
                     continue
 
                 logger.info(f"Найдено {count} объявлений для обработки.")
-
-                with httpx.Client(follow_redirects=True, timeout=30) as client:
+                
+                proxy = config.data.scraper.proxy_url
+                with httpx.Client(follow_redirects=True, timeout=30, proxy=proxy) as client:
                     self.http_client = client
                     with ThreadPoolExecutor(max_workers=config.data.exporter.exporter_workers) as executor:
                         futures = [executor.submit(self._process_ad, url, details) for url, details in ad_data.items()]
@@ -183,9 +184,14 @@ class Exporter:
             t = texts[0]
             try:
                 # Перевод для названия папки, если текст не на русском
-                if detect(t) != 'ru':
-                    t = GoogleTranslator(source='auto', target='ru').translate(t)
-            except: pass
+                lang = detect(t)
+                if lang != 'ru':
+                    proxy = config.data.scraper.proxy_url
+                    proxies = {'http': proxy, 'https': proxy} if proxy else None
+                    t = GoogleTranslator(source='auto', target='ru', proxies=proxies).translate(t)
+                    logger.debug(f"Translated folder name task: '{texts[0][:20]}...' ({lang}) -> '{t[:20]}...'")
+            except Exception as e:
+                logger.debug(f"Translation failed for folder name: {e}")
             
             # Очистка спецсимволов для Windows
             t = re.sub(r'[<>:\"/\\|?*]', '', t).strip()
@@ -254,8 +260,11 @@ class Exporter:
 
             # Перевод текста транскрипции на английский
             try:
-                trans = GoogleTranslator(source='auto', target='en').translate(text)
-            except:
+                proxy = config.data.scraper.proxy_url
+                proxies = {'http': proxy, 'https': proxy} if proxy else None
+                trans = GoogleTranslator(source='auto', target='en', proxies=proxies).translate(text)
+            except Exception as e:
+                logger.debug(f"Transcription translation failed: {e}")
                 trans = "Translation failed."
                 
             out_file = path.parent / config.data.exporter.transcription_filename
