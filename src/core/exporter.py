@@ -62,7 +62,7 @@ class Exporter:
 
                 logger.info(f"Найдено {count} объявлений для обработки.")
                 
-                proxy = config.data.scraper.proxy_url
+                proxy = config.data.scraper.proxy_url or None
                 with httpx.Client(follow_redirects=True, timeout=30, proxy=proxy) as client:
                     self.http_client = client
                     with ThreadPoolExecutor(max_workers=config.data.exporter.exporter_workers) as executor:
