@@ -1,14 +1,20 @@
-.venv/
-venv/
-env/
-__pycache__/
-*.log
-Exporter_Results/
-Parser_Results/
-.git/
-.idea/
-.vscode/
-*.zip
-.DS_Store
-Dockerfile
-docker-compose.yml
+# Git
+.git
+.gitignore
+
+# Python
+.venv
+__pycache__
+*.pyc
+
+# Env
+.env
+
+# Data
+Exporter_Results
+Parser_Results
+session.json
+
+# IDE
+.idea
+.vscode

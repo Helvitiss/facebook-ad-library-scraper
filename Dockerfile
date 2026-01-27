@@ -1,20 +1,7 @@
-FROM python:3.11-slim as builder
-
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
-
 FROM python:3.11-slim
 
-WORKDIR /app
-
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies manually (adapted for Debian/ARM/Raspberry Pi)
+RUN apt-get update && apt-get install -y \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -37,19 +24,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxshmfence1 \
     libglib2.0-0 \
     fonts-liberation \
+    fonts-unifont \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /install /usr/local
+WORKDIR /app
 
+# Copy requirements first for better caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright browsers (Chromium) - skip install-deps as we did it manually
 RUN playwright install chromium
 
-RUN groupadd -r appuser && useradd -r -g appuser -d /app appuser
-
+# Copy the rest of the application
 COPY . .
 
-RUN chown -R appuser:appuser /app
-
-USER appuser
+# Create necessary directories
+RUN mkdir -p Parser_Results Exporter_Results
 
 CMD ["python", "main.py"]
+
