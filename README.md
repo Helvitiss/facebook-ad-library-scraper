@@ -31,8 +31,8 @@
 
 1.  **Клонируйте репозиторий:**
     ```bash
-    git clone https://github.com/your-repo/sin-sobaky.git
-    cd "sin sobaky"
+    https://github.com/Helvitiss/fb_parser.git
+    cd "fb_parser"
     ```
 
 2.  **Настройте окружение:**
