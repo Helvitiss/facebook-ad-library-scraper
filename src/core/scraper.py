@@ -32,7 +32,16 @@ class GraphQLClient:
 
     async def fetch_all_creatives(self, initial_page: GraphQLPage) -> list:
         """Собирает все объявления, проходя по всем страницам пагинации."""
-        self.initial_variables = initial_page.variables.copy() if initial_page.variables else {}
+        if initial_page is None:
+            logger.error("fetch_all_creatives: initial_page is None!")
+            return []
+            
+        if not initial_page.variables:
+            logger.warning("fetch_all_creatives: initial_page.variables is empty or None")
+            self.initial_variables = {}
+        else:
+            self.initial_variables = initial_page.variables.copy()
+            
         seen_ids, all_creatives = set(), []
         
         # Обработка начальной страницы
@@ -210,25 +219,36 @@ class Scraper:
 
                     for resp in gql_responses:
                         try:
+                            # Проверяем статус ответа перед попыткой парсинга
+                            if resp.status != 200:
+                                continue
+                                
                             data = await resp.json()
                             raw = extract_creatives(data)
                             if raw:
                                 req_json = resp.request.post_data_json
                                 vars_ = extract_variables(req_json)
+                                logger.info(f"Данные успешно перехвачены из GQL для {url}")
                                 return GraphQLPage(cursor=extract_cursor(data), raw_creatives=raw, variables=vars_)
                         except Exception as e:
-                            logger.debug(f"GQL Parse Error: {e}")
+                            logger.debug(f"GQL Parse Error for {url}: {e}")
                     
-                    # Пытаемся сразу найти данные в HTML, если GQL не сработал или не полн
+                    # Пытаемся сразу найти данные в HTML, если GQL не сработал или не полон
+                    logger.debug(f"GQL не дал результатов для {url}, пробуем парсить HTML...")
                     html_content = await page.content()
                     info = extract_script_info(html_content)
                     if info:
                         creatives = extract_creatives(info)
                         if creatives:
-                            return GraphQLPage(raw_creatives=creatives)
+                            logger.info(f"Данные успешно извлечены из скриптов HTML для {url}")
+                            return GraphQLPage(raw_creatives=creatives, variables=extract_variables(info))
 
                 except Exception as e:
-                    logger.warning(f"Попытка инициализации {i+1} не удалась: {e}")
+                    logger.warning(f"Попытка инициализации {i+1} для {url} не удалась: {e}")
+            
+            logger.error(f"Все попытки инициализации для {url} провалены.")
+            # Если после всех попыток ничего не нашли, возвращаем пустой объект
+            return GraphQLPage()
         finally:
              await page.close()
 
@@ -404,6 +424,9 @@ async def main(urls: List[str] = None):
             for url in (urls or []):
                 logger.debug(f"Начало обработки: {url}")
                 init = await scraper.get_initial_data(browser, url)
+                if not init or not init.raw_creatives:
+                    logger.warning(f"Не удалось инициализировать данные для {url}. Пропуск.")
+                    continue
                 
                 # Настройка лимитов для предотвращения проблем с сокетами на Windows
                 conn_limit = config.data.scraper.concurrent_requests
@@ -412,6 +435,10 @@ async def main(urls: List[str] = None):
                 async with httpx.AsyncClient(proxy=scraper.proxy, timeout=30, limits=limits) as client:
                     gql = GraphQLClient(client, config.data.facebook_api.endpoint_url, config.data.facebook_api.doc_ids)
                     raw = await gql.fetch_all_creatives(init)
+                    if not raw:
+                        logger.warning(f"Объявления не найдены для {url}. Пропуск.")
+                        continue
+                        
                     groups = await scraper.process_creatives(gql, raw)
                     await scraper.enrich_groups(groups, gql)
                     

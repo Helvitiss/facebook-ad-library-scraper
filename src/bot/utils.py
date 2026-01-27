@@ -86,7 +86,8 @@ async def process_task(original_message: Message, status_message: Message, url: 
         res_dir = await scraper_main([url])
         
         if not res_dir:
-            return await status_message.edit_text("Нет результатов.")
+            logger.warning(f"Парсер вернул пустой результат для {url}")
+            return await status_message.edit_text("Парсер не смог найти данные по этой ссылке. Возможно, поиск не дал результатов или доступ заблокирован.")
 
         await status_message.edit_text("Загрузка и транскрибация...")
         await exporter_main(res_dir)
