@@ -91,10 +91,15 @@ class Exporter:
         uk_s = sum(reaches.get("uk", {}).values())
         total = eu_s + uk_s
 
-        # Фильтрация по минимальному охвату
+        # Фильтрация по минимальному охвату (EU + UK)
         if (total < config.data.exporter.min_reaches or 
             eu_s < config.data.exporter.min_reaches_eu or 
             uk_s < config.data.exporter.min_reaches_uk):
+            
+            if total == 0:
+                logger.info(f"Объявление пропущено: нет данных об охвате в EU/UK")
+            else:
+                logger.info(f"Объявление пропущено: суммарный охват EU+UK ({total}) ниже порога ({config.data.exporter.min_reaches})")
             return None
 
         folder_name = self._get_folder_name(reaches, data.get("ad_texts", []))
@@ -206,13 +211,20 @@ class Exporter:
         p.mkdir(parents=True)
         return p
 
+    _whisper_model: Optional[WhisperModel] = None
+
     def _process_transcriptions(self):
         """Запускает транскрибацию всех найденных видеофайлов."""
-        try:
-            model = WhisperModel("base", device="cpu", compute_type="int8")
-        except Exception as e:
-            logger.error(f"Не удалось инициализировать Whisper: {e}")
-            return
+        if Exporter._whisper_model is None:
+            try:
+                # Используем tiny для скорости, если нужна база — поменяйте обратно
+                # Но для скорости перевода обычно достаточно base или даже tiny
+                Exporter._whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+            except Exception as e:
+                logger.error(f"Не удалось инициализировать Whisper: {e}")
+                return
+
+        model = Exporter._whisper_model
 
         # Поиск видеофайлов
         videos = []

@@ -127,12 +127,14 @@ class Scraper:
         if not self.proxy: return "local"
         for ep in ["http://checkip.amazonaws.com", "http://ipinfo.io/ip"]:
             try:
-                async with httpx.AsyncClient(timeout=15, proxy=self.proxy) as client:
+                async with httpx.AsyncClient(timeout=10, proxy=self.proxy) as client:
                     resp = await client.get(ep)
                     if resp.status_code == 200: return resp.text.strip()
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                logger.debug(f"Сетевая ошибка при определении IP через {ep}: {e}")
             except Exception as e:
                 logger.debug(f"Ошибка определения IP через {ep}: {e}")
-        return None
+        return "Local (Error/Offline)"
 
     async def _change_proxy_ip(self) -> Optional[str]:
         """Триггерит смену IP прокси, если настроен URL для смены."""
@@ -191,14 +193,20 @@ class Scraper:
             for i in range(3):
                 try:
                     gql_responses.clear()
-                    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    await page.goto(url, wait_until="load", timeout=45000)
                     
-                    # Прокрутка для активации подгрузки данных
-                    for _ in range(4):
-                        await page.evaluate("window.scrollBy(0, 1000)")
-                        await asyncio.sleep(1)
+                    # Небольшая пауза перед скроллом для стабильности контекста
+                    await asyncio.sleep(1)
                     
-                    await page.wait_for_timeout(3000)
+                    # Прокрутка для активации (с защитой от разрушения контекста)
+                    for _ in range(3):
+                        try:
+                            if page.is_closed(): break
+                            await page.evaluate("window.scrollBy(0, 1000)")
+                            await asyncio.sleep(0.6)
+                        except: break
+                    
+                    await page.wait_for_timeout(2000)
 
                     for resp in gql_responses:
                         try:
@@ -281,31 +289,34 @@ class Scraper:
         creatives = [c for g in groups for c in g.creatives if not c.transparency_data]
         
         pending = creatives
-        while pending:
-            tasks = [self._enrich_one(c, gql_client) for c in pending]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            to_retry = []
-            
-            for c, res in zip(pending, results):
-                if isinstance(res, RateLimitExceededError):
-                    to_retry.append(c)
-                elif isinstance(res, Exception):
-                    logger.error(f"Критическая ошибка при получении деталей {c.ad_archive_id}: {res}")
-            
-            if to_retry:
-                logger.info(f"Лимит превышен. Нужно догрузить {len(to_retry)} элементов после смены IP.")
-                await self._change_proxy_ip()
-            
-            pending = to_retry
         
-        # Агрегация охватов
-        self._aggregate_reaches(groups)
 
-        # Обработка прозрачности ссылок (RSOC)
+        # Объединяем сбор охватов и RSOC в параллельное выполнение
         extractor = RSOCExtractor(proxy=self.proxy)
-        logger.info("Анализ ссылок (RSOC)...")
-        # Используем тот же http_client для RSOC, чтобы не плодить новые соединения
-        await asyncio.gather(*[self._proc_rsoc(g, extractor, gql_client.client) for g in groups if g.link_url])
+        logger.info("Сбор статистики и анализ ссылок (RSOC)...")
+        
+        async def _run_enrichment():
+            nonlocal pending
+            while pending:
+                tasks = [self._enrich_one(c, gql_client) for c in pending]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                to_retry = []
+                for c, res in zip(pending, results):
+                    if isinstance(res, RateLimitExceededError): to_retry.append(c)
+                    elif isinstance(res, Exception): logger.error(f"Ошибка деталей {c.ad_archive_id}: {res}")
+                if to_retry:
+                    logger.info(f"Лимит. Переподключение...")
+                    await self._change_proxy_ip()
+                pending = to_retry
+
+        # Запускаем RSOC и Reaches одновременно
+        await asyncio.gather(
+            _run_enrichment(),
+            *[self._proc_rsoc(g, extractor, gql_client.client) for g in groups if g.link_url]
+        )
+
+        # Агрегация охватов выполняется ПОСЛЕ того, как все данные получены
+        self._aggregate_reaches(groups)
 
     async def _enrich_one(self, creative: Creative, gql_client: GraphQLClient):
         async with self.enricher_semaphore:
@@ -317,11 +328,15 @@ class Scraper:
                         raise RateLimitExceededError()
                         
                     creative.transparency_data = res.get("data", {})
+                    if creative.transparency_data:
+                        logger.debug(f"Данные для {creative.ad_archive_id} получены успешно.")
                     return
-                except (RateLimitExceededError, httpx.ConnectError):
+                except (RateLimitExceededError, httpx.ConnectError, httpx.RequestError) as e:
+                    if isinstance(e, httpx.ConnectError):
+                        logger.warning(f"Ошибка соединения (DNS/Network) для {creative.ad_archive_id}: {e}")
                     # Если ошибка соединения (в т.ч. DNS), подождем немного
                     await asyncio.sleep(0.5)
-                    raise
+                    if isinstance(e, RateLimitExceededError): raise
                 except Exception as e:
                     logger.debug(f"Попытка {i+1} получения деталей {creative.ad_archive_id} провалена: {e}")
                     await asyncio.sleep(0.1)
@@ -330,6 +345,7 @@ class Scraper:
 
     def _aggregate_reaches(self, groups: List[AdGroup]):
         """Суммирует данные об охватах по странам (EU и UK)."""
+        total_found = 0
         for group in groups:
             eu_map, uk_map = {}, {}
             for c in group.creatives:
@@ -356,11 +372,17 @@ class Scraper:
                             if summary > 0:
                                 target_map = eu_map if region_code == "eu" else uk_map
                                 target_map[country] = target_map.get(country, 0) + summary
+                                total_found += summary
                                 
                 except Exception as e:
                     logger.error(f"Ошибка агрегации статистики для {c.ad_archive_id}: {e}")
 
             group.total_reaches = {"eu": eu_map, "uk": uk_map}
+        
+        if total_found == 0:
+            logger.warning("Агрегация: охваты не найдены. Facebook вернул пустые данные или иное ГЕО.")
+        else:
+            logger.info(f"Агрегация завершена. Суммарный охват: {total_found}")
 
     async def _proc_rsoc(self, group: AdGroup, extractor: RSOCExtractor, http_client: httpx.AsyncClient):
         """Парсит ключевые слова RSOC по ссылке."""

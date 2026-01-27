@@ -31,8 +31,8 @@
 
 1.  **Клонируйте репозиторий:**
     ```bash
-    https://github.com/Helvitiss/facebook-ad-library-scraper.git
-    cd facebook-ad-library-scraper
+    https://github.com/Helvitiss/fb_parser.git
+    cd "fb_parser"
     ```
 
 2.  **Настройте окружение:**
