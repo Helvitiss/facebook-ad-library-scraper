@@ -48,7 +48,7 @@
 
 4.  **Запустите:**
     ```bash
-    docker-compose up -d --build
+    docker compose up -d --build
     ```
 
 Бот начнет работу. Логи доступны по команде `docker-compose logs -f`. Результаты будут появляться в папке `Exporter_Results`.
