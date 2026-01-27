@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 import shutil
 import os
 from pathlib import Path
@@ -20,12 +21,29 @@ class TelegramLogHandler:
         self.message = message
         self.loop = asyncio.get_running_loop()
         self.last_text = ""
+        self.last_update_time = 0
+        self.cooldown = 1.5 # Задержка между обновлениями в секундах
+        self.update_task = None
+        self.pending_text = None
         
     def write(self, log_record):
         try:
-            asyncio.run_coroutine_threadsafe(self.update_message(log_record), self.loop)
+            self.pending_text = log_record
+            now = time.time()
+            if now - self.last_update_time >= self.cooldown:
+                asyncio.run_coroutine_threadsafe(self.update_message(log_record), self.loop)
+            else:
+                # Если мы в кулдауне, планируем обновление на потом, если еще не запланировано
+                if not self.update_task or self.update_task.done():
+                    delay = self.cooldown - (now - self.last_update_time)
+                    self.update_task = asyncio.run_coroutine_threadsafe(self._delayed_update(delay), self.loop)
         except Exception:
             pass
+
+    async def _delayed_update(self, delay):
+        await asyncio.sleep(delay)
+        if self.pending_text:
+            await self.update_message(self.pending_text)
 
     async def update_message(self, log_record):
         try:
@@ -44,7 +62,10 @@ class TelegramLogHandler:
             new_text = f"{prefix} {content}"
             
             if new_text == self.last_text: return
+            
             self.last_text = new_text
+            self.last_update_time = time.time()
+            self.pending_text = None
             await self.message.edit_text(new_text)
         except Exception:
             pass

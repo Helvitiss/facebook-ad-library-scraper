@@ -73,11 +73,12 @@ class GraphQLClient:
 
     async def _fetch_next_page(self, current_page: GraphQLPage) -> GraphQLPage:
         """Запрашивает следующую страницу результатов."""
-        for i in range(5):
+        for i in range(config.data.scraper.retries_per_creative):
             try:
                 vars_ = self.initial_variables.copy()
                 vars_["cursor"] = current_page.cursor
-                payload = {"variables": json.dumps(vars_), "doc_id": self.doc_ids["pagination"]}
+                doc_id = current_page.doc_id or self.doc_ids["pagination"]
+                payload = {"variables": json.dumps(vars_), "doc_id": doc_id}
                 
                 await config.IP_READY_EVENT.wait()
                 resp = await self.client.post(self.endpoint_url, data=payload)
@@ -85,9 +86,11 @@ class GraphQLClient:
                 
                 data = resp.json()
                 return GraphQLPage(cursor=extract_cursor(data), raw_creatives=extract_creatives_from_pagination(data))
-            except Exception as e:
-                logger.warning(f"Ошибка получения страницы (попытка {i+1}): {e}")
-                await asyncio.sleep(1)
+            except (httpx.ConnectError, httpx.ProxyError, httpx.HTTPError) as e:
+                is_conn = isinstance(e, (httpx.ConnectError, httpx.ProxyError))
+                wait = (2 ** i) + 1 if is_conn else 1
+                logger.warning(f"Ошибка получения страницы (попытка {i+1}): {e}. Ждем {wait}с")
+                await asyncio.sleep(wait)
         return GraphQLPage()
 
     async def fetch_all_creatives_from_collation(self, collation_id: str) -> list:
@@ -99,15 +102,28 @@ class GraphQLClient:
             vars_["forwardCursor"] = next_cursor
             payload = {"variables": json.dumps(vars_), "doc_id": self.doc_ids["collation"]}
             
-            await config.IP_READY_EVENT.wait()
-            resp = await self.client.post(self.endpoint_url, data=payload)
-            resp.raise_for_status()
-            
-            data = resp.json()
-            res = data.get("data", {}).get("ad_library_main", {}).get("collation_results", {})
-            all_cards.extend(res.get("ad_cards", []))
-            next_cursor = res.get("forward_cursor")
-            has_next = bool(next_cursor)
+            for i in range(config.data.scraper.retries_per_creative):
+                try:
+                    await config.IP_READY_EVENT.wait()
+                    resp = await self.client.post(self.endpoint_url, data=payload)
+                    resp.raise_for_status()
+                    
+                    data = resp.json()
+                    res = data.get("data", {}).get("ad_library_main", {}).get("collation_results", {})
+                    all_cards.extend(res.get("ad_cards", []))
+                    next_cursor = res.get("forward_cursor")
+                    has_next = bool(next_cursor)
+                    break 
+                except (httpx.ConnectError, httpx.ProxyError, httpx.HTTPError) as e:
+                    is_conn = isinstance(e, (httpx.ConnectError, httpx.ProxyError))
+                    wait = (2 ** i) + 1 if is_conn else 1
+                    logger.warning(f"Ошибка collation {collation_id} (попытка {i+1}): {e}. Ждем {wait}с")
+                    await asyncio.sleep(wait)
+                    if i == config.data.scraper.retries_per_creative - 1:
+                        has_next = False
+            else:
+                has_next = False
+
         return all_cards
 
     async def fetch_creative_info(self, ad_id: str) -> dict:
@@ -226,10 +242,28 @@ class Scraper:
                             data = await resp.json()
                             raw = extract_creatives(data)
                             if raw:
-                                req_json = resp.request.post_data_json
-                                vars_ = extract_variables(req_json)
-                                logger.info(f"Данные успешно перехвачены из GQL для {url}")
-                                return GraphQLPage(cursor=extract_cursor(data), raw_creatives=raw, variables=vars_)
+                                req_body = resp.request.post_data
+                                vars_ = extract_variables(req_body)
+                                
+                                # Извлекаем doc_id из тела запроса (JSON или form-urlencoded)
+                                doc_id = None
+                                try:
+                                    req_json = resp.request.post_data_json
+                                    if req_json: doc_id = str(req_json.get("doc_id", ""))
+                                except: pass
+                                
+                                if not doc_id and isinstance(req_body, str):
+                                    from urllib.parse import parse_qs
+                                    params = parse_qs(req_body)
+                                    doc_id = params.get("doc_id", [None])[0]
+
+                                logger.info(f"Данные успешно перехвачены из GQL для {url} (doc_id: {doc_id})")
+                                return GraphQLPage(
+                                    cursor=extract_cursor(data), 
+                                    raw_creatives=raw, 
+                                    variables=vars_,
+                                    doc_id=doc_id
+                                )
                         except Exception as e:
                             logger.debug(f"GQL Parse Error for {url}: {e}")
                     
@@ -352,16 +386,21 @@ class Scraper:
                         logger.debug(f"Данные для {creative.ad_archive_id} получены успешно.")
                     return
                 except (RateLimitExceededError, httpx.ConnectError, httpx.RequestError) as e:
-                    if isinstance(e, httpx.ConnectError):
-                        logger.warning(f"Ошибка соединения (DNS/Network) для {creative.ad_archive_id}: {e}")
-                    # Если ошибка соединения (в т.ч. DNS), подождем немного
-                    await asyncio.sleep(0.5)
-                    if isinstance(e, RateLimitExceededError): raise
+                    is_conn_error = isinstance(e, (httpx.ConnectError, httpx.ProxyError))
+                    if is_conn_error:
+                        logger.warning(f"Ошибка соединения (попытка {i+1}) для {creative.ad_archive_id}: {e}")
+                    
+                    if isinstance(e, RateLimitExceededError):
+                        raise
+                    
+                    # Экспоненциальная задержка для сетевых ошибок
+                    wait_time = (2 ** i) + 1 if is_conn_error else 0.5
+                    await asyncio.sleep(wait_time)
                 except Exception as e:
                     logger.debug(f"Попытка {i+1} получения деталей {creative.ad_archive_id} провалена: {e}")
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
             
-            raise Exception(f"Не удалось получить детали для {creative.ad_archive_id} после всех попыток")
+            raise Exception(f"Не удалось получить детали для {creative.ad_archive_id} после {config.data.scraper.retries_per_creative} попыток")
 
     def _aggregate_reaches(self, groups: List[AdGroup]):
         """Суммирует данные об охватах по странам (EU и UK)."""
@@ -432,7 +471,7 @@ async def main(urls: List[str] = None):
                 conn_limit = config.data.scraper.concurrent_requests
                 # Оставляем запас для других запросов
                 limits = httpx.Limits(max_keepalive_connections=conn_limit, max_connections=conn_limit + 10)
-                async with httpx.AsyncClient(proxy=scraper.proxy, timeout=30, limits=limits) as client:
+                async with httpx.AsyncClient(proxy=scraper.proxy, timeout=30, limits=limits, follow_redirects=True) as client:
                     gql = GraphQLClient(client, config.data.facebook_api.endpoint_url, config.data.facebook_api.doc_ids)
                     raw = await gql.fetch_all_creatives(init)
                     if not raw:
@@ -455,4 +494,5 @@ async def main(urls: List[str] = None):
                         
             return str(results_dir)
         finally:
-            await browser.close()
+            try: await browser.close()
+            except: pass

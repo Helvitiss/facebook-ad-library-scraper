@@ -7,6 +7,7 @@ class GraphQLPage:
     cursor: Optional[str] = None
     raw_creatives: list = field(default_factory=list)
     variables: Optional[dict] = None
+    doc_id: Optional[str] = None
 
 @dataclass
 class Creative:

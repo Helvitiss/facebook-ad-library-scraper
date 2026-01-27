@@ -1,4 +1,5 @@
 import json
+from typing import Any
 from bs4 import BeautifulSoup
 
 def recursively_extract_value(data, key_name: str) -> list:
@@ -15,18 +16,24 @@ def recursively_extract_value(data, key_name: str) -> list:
     recurse(data)
     return results
 
-def extract_script_info(html: str):
-    """Извлекает JSON данные из тегов <script>, проверяя наличие маркера collated_results."""
+def extract_script_info(html: str, marker: str = "collated_results"):
+    """Извлекает JSON данные из тегов <script>, проверяя наличие заданного маркера."""
     soup = BeautifulSoup(html, 'lxml')
     for script_tag in soup.find_all('script'):
         text = script_tag.string
-        if text and "collated_results" in text:
+        if text and marker in text:
             try: return json.loads(text)
             except: continue
     return None
 
-def extract_creatives(data: dict): 
-    """Извлекает список креативов из JSON структуры."""
+def extract_creatives(data: Any): 
+    """Извлекает список креативов из JSON структуры или HTML строки."""
+    if isinstance(data, str):
+        # Если это HTML, пробуем найти скрипт с данными
+        json_data = extract_script_info(data)
+        if json_data: return extract_creatives(json_data)
+        return []
+        
     return recursively_extract_value(data, "collated_results")
 
 def extract_cursor(data: dict):
@@ -34,10 +41,48 @@ def extract_cursor(data: dict):
     result = recursively_extract_value(data, "end_cursor")
     return result[0] if result else None
 
-def extract_variables(data: dict):
+def extract_variables(data: Any):
     """Извлекает переменные запроса (variables) для последующих вызовов API."""
-    result = recursively_extract_value(data, "variables")
-    return json.loads(result[0]) if result and result[0] else None
+    if isinstance(data, str):
+        # 1. Проверяем, не JSON ли это строка
+        try:
+            potential_json = json.loads(data)
+            if isinstance(potential_json, (dict, list)):
+                return extract_variables(potential_json)
+        except: pass
+        
+        # 2. Если это HTML, ищем в скриптах (сначала пробуем найти блок с переменными)
+        if "<html" in data.lower() or "<script" in data.lower():
+            # Попытка найти блок, где явно указаны variables
+            json_data = extract_script_info(data, "variables")
+            if not json_data:
+                # Если не нашли, пробуем стандартный блок с результатами
+                json_data = extract_script_info(data, "collated_results")
+                
+            if json_data: return extract_variables(json_data)
+
+        # 3. Пробуем как query string / form-data (URL параметры)
+        from urllib.parse import parse_qs
+        params = parse_qs(data)
+        vars_str = params.get("variables", [None])[0]
+        if vars_str:
+            try: return json.loads(vars_str)
+            except: return None
+        return None
+        
+    results = recursively_extract_value(data, "variables")
+    for val in results:
+        if not val: continue
+        if isinstance(val, str):
+            try: 
+                parsed = json.loads(val)
+                if isinstance(parsed, dict) and (parsed.get("ad_type") or parsed.get("q")):
+                    return parsed
+            except: continue
+        elif isinstance(val, dict) and (val.get("ad_type") or val.get("q")):
+            return val
+            
+    return results[0] if results and results[0] else None
 
 def extract_video_urls(creative_dict: dict):
     """Извлекает ссылки на видео (SD качество) из снепшота или карточек."""

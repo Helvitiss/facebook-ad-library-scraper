@@ -49,3 +49,24 @@ def test_extract_from_jwt(extractor):
     
     kws = extractor.extract_from_jwt(text)
     assert "jwt_secret_keyword" in kws
+
+def test_extract_deep(extractor):
+    # Тест агрессивного извлечения из неизвестных ключей
+    payload = {"technical_key": "unexpected_keyword", "nested": [{"unknown": "deep_keyword"}]}
+    kws = extractor._extract_from_dict(payload)
+    assert "unexpected_keyword" in kws
+    assert "deep_keyword" in kws
+
+def test_extract_raw_base64(extractor):
+    # Тест извлечения из сырой Base64 строки (не JWT)
+    import base64
+    import json
+    
+    payload = {"q": "base64_hidden_query"}
+    payload_json = json.dumps(payload).encode()
+    # Длинная строка для прохождения паттерна {24,}
+    payload_b64 = base64.b64encode(payload_json).decode() + "padding_to_make_it_long_enough"
+    
+    text = f"Some data: {payload_b64}"
+    kws = extractor.extract_from_jwt(text)
+    assert "base64_hidden_query" in kws

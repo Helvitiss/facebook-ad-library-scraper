@@ -22,7 +22,9 @@ class RSOCExtractor:
         "suggestedQueries", "suggested_queries", "related", "relatedTerms", 
         "related_terms", "relatedQueries", "related_queries", "recommendations", 
         "recommendedTerms", "recommended_terms", "recommendedQueries", 
-        "recommended_queries", "seedKeywords", "seed_keywords", "seedTerms", "seed_terms"
+        "recommended_queries", "seedKeywords", "seed_keywords", "seedTerms", "seed_terms",
+        "p", "v", "tid", "click_id", "cid", "subid", "subid1", "subid2", "ad_id", "campaign_id",
+        "tkn", "token", "session", "jwt", "payload", "data"
     }
 
     # Структурные / контекстные ключи только для рекурсии
@@ -43,7 +45,8 @@ class RSOCExtractor:
         ".com", ".net", ".org", "ads", "advertising", "marketing", "tracker", 
         "redirect", "android", "iphone", "ipad", "linux", "google", "bing", "yahoo",
         "ad_blocked", "device_type", "platform_name", "track_id", "channel", 
-        "city", "country", "lang", "language", "network", "target_url", "dest"
+        "city", "country", "lang", "language", "network", "target_url", "dest",
+        "hs256", "jwt", "unknown", "none"
     }
 
     SPLIT_PATTERN = r'[,|;\n]|\s*\|\|\s*|\s*::\s*'
@@ -103,6 +106,8 @@ class RSOCExtractor:
         if re.search(r'[=+\*<>;]', s_lower): return False
         if s.startswith('_') or s.startswith('$'): return False
         if "window" in s_lower or "document" in s_lower: return False
+        # Фильтрация длинных непонятных строк (хеши, ID), если они не содержат пробелов
+        if len(s) > 20 and " " not in s and re.search(r'[0-9]', s): return False
         return True
 
     def _split_keywords(self, text: Any) -> list[str]:
@@ -167,38 +172,74 @@ class RSOCExtractor:
 
     def extract_from_jwt(self, text: str) -> list[str]:
         keywords = []
+        # 1. Поиск стандартных JWT
         jwt_pattern = r'([a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)'
         matches = re.findall(jwt_pattern, text)
-        for match in matches:
+        
+        # 2. Поиск длинных Base64 строк, которые могут быть JSON
+        base64_pattern = r'([a-zA-Z0-9+/=]{24,})'
+        matches.extend(re.findall(base64_pattern, text))
+
+        for match in set(matches):
             try:
-                parts = match.split('.')
-                payload_b64 = parts[1]
+                payload_json = None
+                if '.' in match:
+                    # Обработка JWT
+                    parts = match.split('.')
+                    if len(parts) != 3: continue
+                    payload_b64 = parts[1]
+                else:
+                    # Обработка сырого Base64
+                    payload_b64 = match
+
                 missing_padding = len(payload_b64) % 4
                 if missing_padding: payload_b64 += '=' * (4 - missing_padding)
-                payload_json = base64.urlsafe_b64decode(payload_b64).decode('utf-8')
-                data = json.loads(payload_json)
-                if isinstance(data, dict):
-                    keywords.extend(self._extract_from_dict(data))
+                
+                try:
+                    decoded = base64.urlsafe_b64decode(payload_b64).decode('utf-8', errors='ignore')
+                except:
+                    # Fallback to standard base64 if urlsafe fails
+                    decoded = base64.b64decode(payload_b64).decode('utf-8', errors='ignore')
+
+                if '{' in decoded and '}' in decoded:
+                    payload_json = json.loads(re.search(r'(\{.*\})', decoded).group(1))
+                
+                if payload_json and isinstance(payload_json, dict):
+                    logger.debug(f"Успешно декодирован токен/Base64. Ключи: {list(payload_json.keys())}")
+                    keywords.extend(self._extract_from_dict(payload_json))
             except: continue
         return keywords
 
-    def _extract_from_dict(self, data: dict) -> list[str]:
+    def _extract_from_dict(self, data: Any) -> list[str]:
         extracted = []
-        for k, v in data.items():
-            k_lower = k.lower()
-            if k_lower in self.SEARCH_KEYS or "rsoc" in k_lower:
-                extracted.extend(self._split_keywords(v))
-            elif k_lower in self.CONTEXT_KEYS:
-                if isinstance(v, dict):
+        if isinstance(data, dict):
+            for k, v in data.items():
+                k_lower = k.lower()
+                # 1. Если ключ известный — берем безусловно
+                if k_lower in self.SEARCH_KEYS or "rsoc" in k_lower:
+                    extracted.extend(self._split_keywords(v))
+                
+                # 2. Рекурсия для вложенных структур
+                if isinstance(v, (dict, list)):
                     extracted.extend(self._extract_from_dict(v))
-                elif isinstance(v, list):
-                    for item in v:
-                        if isinstance(item, dict):
-                            extracted.extend(self._extract_from_dict(item))
+                
+                # 3. Агрессивный захват: если значение - строка и похожа на запрос
+                elif isinstance(v, str) and self._is_valid_keyword(v.strip()):
+                    # Избегаем захвата чисто технических ID и HEX
+                    if not re.match(r'^[a-f0-9_\-\.]{15,}$', v.strip().lower()):
+                        extracted.append(self._sanitize_geo(v.strip()))
+                        
+        elif isinstance(data, list):
+            for item in data:
+                extracted.extend(self._extract_from_dict(item))
+                
         return extracted
 
     def extract_from_html(self, html: str) -> list[str]:
         keywords = []
+        # Извлечение из JWT токенов, зашитых в HTML (скрипты, конфиги)
+        keywords.extend(self.extract_from_jwt(html))
+        
         data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries)\s*=\s*[\"\']([^\"\']+)[\"\']'
         keywords.extend(self._split_keywords(re.findall(data_attr_pattern, html, re.I)))
         for key in self.SEARCH_KEYS:
