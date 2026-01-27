@@ -147,9 +147,14 @@ class RSOCExtractor:
                     all_keywords.extend(self.extract_from_html(response.text))
         except Exception as e:
             logger.warning(f"Ошибка при обработке ссылки {url}: {e}")
+        
         unique_results = []
         seen = set()
         for kw in all_keywords:
+            if not kw: continue
+            # Игнорируем голые плейсхолдеры
+            if kw in ("{country}", "{city}", "{}"): continue
+            
             low = kw.lower()
             if low not in seen:
                 seen.add(low)
@@ -215,9 +220,11 @@ class RSOCExtractor:
         if isinstance(data, dict):
             for k, v in data.items():
                 k_lower = k.lower()
-                # 1. Если ключ известный — берем безусловно
+                # 1. Если ключ известный — берем его содержимое (обычно это строки с разделителями)
                 if k_lower in self.SEARCH_KEYS or "rsoc" in k_lower:
                     extracted.extend(self._split_keywords(v))
+                    # Если ключ совпал, не переходим к агрессивному захвату для этого же значения
+                    continue
                 
                 # 2. Рекурсия для вложенных структур
                 if isinstance(v, (dict, list)):
