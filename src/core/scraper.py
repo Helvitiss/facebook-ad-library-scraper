@@ -164,6 +164,7 @@ class Scraper:
     async def _change_proxy_ip(self) -> Optional[str]:
         """Триггерит смену IP прокси, если настроен URL для смены."""
         if not config.data.scraper.proxy_change_url or not self.proxy:
+            logger.debug("Смена IP пропущена: URL смены IP не настроен или прокси не используется.")
             return None
             
         if not config.IP_READY_EVENT.is_set():
@@ -351,17 +352,37 @@ class Scraper:
         
         async def _run_enrichment():
             nonlocal pending
-            while pending:
+            global_retries = 0
+            max_global_retries = 10
+            
+            while pending and global_retries < max_global_retries:
                 tasks = [self._enrich_one(c, gql_client) for c in pending]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
+                
                 to_retry = []
                 for c, res in zip(pending, results):
-                    if isinstance(res, RateLimitExceededError): to_retry.append(c)
-                    elif isinstance(res, Exception): logger.error(f"Ошибка деталей {c.ad_archive_id}: {res}")
+                    if isinstance(res, RateLimitExceededError): 
+                        to_retry.append(c)
+                    elif isinstance(res, Exception): 
+                        logger.error(f"Ошибка деталей {c.ad_archive_id}: {res}")
+                
                 if to_retry:
-                    logger.info(f"Лимит. Переподключение...")
-                    await self._change_proxy_ip()
+                    global_retries += 1
+                    logger.info(f"Рейт-лимит (попытка {global_retries}/{max_global_retries}). Ожидание и смена IP...")
+                    
+                    # Пробуем сменить IP
+                    new_ip = await self._change_proxy_ip()
+                    
+                    # Если IP не сменился или смена не настроена, ждем дольше
+                    wait_time = 15 if new_ip else 30
+                    if global_retries > 5: wait_time *= 2 # Экспоненциальное замедление
+                    
+                    await asyncio.sleep(wait_time)
+                
                 pending = to_retry
+            
+            if pending:
+                logger.error(f"Не удалось обогатить {len(pending)} объявлений после {max_global_retries} глобальных попыток.")
 
         # Запускаем RSOC и Reaches одновременно
         await asyncio.gather(
