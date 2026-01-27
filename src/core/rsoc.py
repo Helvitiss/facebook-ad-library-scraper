@@ -12,7 +12,7 @@ import geonamescache
 from loguru import logger
 
 class RSOCExtractor:
-    # High-confidence keys that usually contain search phrases
+    # Ключи с высокой вероятностью содержащие поисковые фразы
     SEARCH_KEYS = {
         "utm_term", "utm_terms", "term", "terms", "keyword", "keywords", "kw", "kws", 
         "query", "queries", "q", "qs", "search", "search_term", "search_terms", 
@@ -25,7 +25,7 @@ class RSOCExtractor:
         "recommended_queries", "seedKeywords", "seed_keywords", "seedTerms", "seed_terms"
     }
 
-    # Structural / context keys for recursion only
+    # Структурные / контекстные ключи только для рекурсии
     CONTEXT_KEYS = {
         "feed", "feedData", "feed_data", "feedItems", "feed_items", "items", "list", 
         "data", "payload", "content", "results", "result", "entries", "entry", "cards", 
@@ -35,7 +35,7 @@ class RSOCExtractor:
         "__NEXT_DATA__", "__NUXT__", "pageData", "searchConfig", "search_config"
     }
 
-    # Technical noise to always ignore
+    # Технический шум, который всегда игнорируется
     BLACKLIST = {
         "facebook", "windows", "desktop", "macintosh", "chrome", "safari", "mozilla", 
         "webkit", "application", "json", "html", "true", "false", "null", "undefined", 
@@ -60,7 +60,7 @@ class RSOCExtractor:
             }
         }
         
-        # Initialize Geo Data
+        # Инициализация гео-данных
         self.countries = {c.name.lower(): c.name for c in pycountry.countries}
         
         gc = geonamescache.GeonamesCache()
@@ -122,15 +122,24 @@ class RSOCExtractor:
                 cleaned.append(self._sanitize_geo(s))
         return cleaned
 
-    async def process_link(self, url: str) -> list[str]:
+    async def process_link(self, url: str, http_client: Optional[httpx.AsyncClient] = None) -> list[str]:
         all_keywords = []
         try:
-            async with httpx.AsyncClient(**self.client_kwargs) as client:
-                response = await client.get(url)
+            if http_client:
+                # Используем переданный клиент
+                response = await http_client.get(url)
                 for history_resp in response.history:
                     all_keywords.extend(self.extract_from_url(str(history_resp.url)))
                 all_keywords.extend(self.extract_from_url(str(response.url)))
                 all_keywords.extend(self.extract_from_html(response.text))
+            else:
+                # fallback - создаем свой клиент, если внешний не передан
+                async with httpx.AsyncClient(**self.client_kwargs) as client:
+                    response = await client.get(url)
+                    for history_resp in response.history:
+                        all_keywords.extend(self.extract_from_url(str(history_resp.url)))
+                    all_keywords.extend(self.extract_from_url(str(response.url)))
+                    all_keywords.extend(self.extract_from_html(response.text))
         except Exception as e:
             logger.warning(f"Ошибка при обработке ссылки {url}: {e}")
         unique_results = []

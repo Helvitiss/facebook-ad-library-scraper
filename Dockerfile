@@ -1,3 +1,14 @@
+FROM python:3.11-slim as builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
 FROM python:3.11-slim
 
 # Установка системных зависимостей (вручную для лучшей совместимости)
@@ -24,7 +35,6 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     libglib2.0-0 \
     fonts-liberation \
-    fonts-unifont \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
@@ -44,4 +54,3 @@ COPY . .
 RUN mkdir -p Parser_Results Exporter_Results
 
 CMD ["python", "main.py"]
-

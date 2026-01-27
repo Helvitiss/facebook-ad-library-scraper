@@ -28,11 +28,13 @@ async def main():
     await start_worker()
 
     logger.info("Bot started!")
-    # Разрешаем параллельную обработку обновлений
-    await dp.start_polling(bot, handle_signals=False)
+    try:
+        await dp.start_polling(bot, handle_signals=False)
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped by user")

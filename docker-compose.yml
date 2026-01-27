@@ -3,8 +3,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: fb_scraper_bot
     restart: always
+    stop_grace_period: 30s
+
+    # Environment variables from .env file
+    env_file:
+      - .env
+
+    # Optional: Override/Add specific env vars
     stop_grace_period: 30s
 
     # Environment variables from .env file
