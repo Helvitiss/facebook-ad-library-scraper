@@ -1,10 +1,10 @@
 {
   "scraper": {
-    "concurrent_requests": 45,
+    "concurrent_requests": 50,
     "retries_per_creative": 5,
     "url_workers": 3,
-    "proxy_url": "",
-    "proxy_change_url": ""
+    "proxy_url": "ENV_VAR",
+    "proxy_change_url": "ENV_VAR"
   },
   "exporter": {
     "max_retries": 5,
@@ -29,8 +29,8 @@
   },
   "telegram": {
     "token": "ENV_VAR",
-    "user_ids": [],
-    "owner_ids": []
+    "user_ids": "ENV_VAR",
+    "owner_ids": "ENV_VAR"
   },
   "video_extensions": [
     ".mp4",

@@ -11,6 +11,7 @@ from loguru import logger
 # --- Модели Pydantic для валидации конфигурации ---
 
 class ScraperConfig(BaseModel):
+    """Конфигурация парсера (Scraper)."""
     concurrent_requests: int = 45
     retries_per_creative: int = 5
     url_workers: int = 3
@@ -18,6 +19,7 @@ class ScraperConfig(BaseModel):
     proxy_change_url: Optional[str] = ""
 
 class ExporterConfig(BaseModel):
+    """Конфигурация экспортера данных."""
     max_retries: int = 5
     exporter_workers: int = 20
     details_filename: str = "Details.txt"
@@ -31,15 +33,18 @@ class ExporterConfig(BaseModel):
     min_reaches_uk: int = 0
 
 class FacebookApiConfig(BaseModel):
+    """Настройки доступа к API Facebook."""
     endpoint_url: str = "https://www.facebook.com/api/graphql/"
     doc_ids: Dict[str, str]
 
 class TelegramConfig(BaseModel):
+    """Настройки Telegram бота."""
     token: str
     user_ids: List[int]
     owner_ids: List[int] = []
 
 class AppConfig(BaseModel):
+    """Главная схема конфигурации приложения."""
     scraper: ScraperConfig
     exporter: ExporterConfig
     facebook_api: FacebookApiConfig
@@ -49,6 +54,7 @@ class AppConfig(BaseModel):
 # --- Класс управления конфигурацией ---
 
 class Config:
+    """Класс-одиночка для управления загрузкой, валидацией и сохранением конфигурации."""
     def __init__(self, config_path: str | Path):
         self.path = Path(config_path).resolve()
         
@@ -66,69 +72,123 @@ class Config:
         self.reload()
 
     def reload(self):
+        """Перезагружает конфигурацию из файла и переменных окружения."""
         try:
             if not self.path.exists():
-                logger.error(f"Config file not found: {self.path}")
+                logger.error(f"Файл конфигурации не найден: {self.path}")
                 return
 
             with open(self.path, "r", encoding="utf-8") as f:
                 raw_cfg = json.load(f)
             
-            # Подстановка секретов из ENV (переменные окружения имеют приоритет)
-            telegram_cfg = raw_cfg.setdefault("telegram", {})
-            scraper_cfg = raw_cfg.setdefault("scraper", {})
+            # Маппинг ключей конфига на ENV переменные
+            env_map = {
+                ("telegram", "token"): "TG_TOKEN",
+                ("telegram", "user_ids"): "TG_USER_IDS",
+                ("telegram", "owner_ids"): "TG_OWNER_IDS",
+                ("scraper", "proxy_url"): "PROXY_URL",
+                ("scraper", "proxy_change_url"): "PROXY_CHANGE_URL",
+            }
             
-            # Токен
-            if os.getenv("TG_TOKEN"):
-                telegram_cfg["token"] = os.getenv("TG_TOKEN")
-            
-            # User IDs - ENV имеет приоритет
-            if os.getenv("TG_USER_IDS"):
-                user_ids_str = os.getenv("TG_USER_IDS")
-                user_ids = [int(uid.strip()) for uid in user_ids_str.split(",") if uid.strip()]
-                telegram_cfg["user_ids"] = user_ids
-            
-            # Owner IDs - ENV имеет приоритет
-            if os.getenv("TG_OWNER_IDS"):
-                owner_ids_str = os.getenv("TG_OWNER_IDS")
-                owner_ids = [int(oid.strip()) for oid in owner_ids_str.split(",") if oid.strip()]
-                telegram_cfg["owner_ids"] = owner_ids
-            
-            # Прокси
-            if os.getenv("PROXY_URL"):
-                scraper_cfg["proxy_url"] = os.getenv("PROXY_URL")
-            
-            if os.getenv("PROXY_CHANGE_URL"):
-                scraper_cfg["proxy_change_url"] = os.getenv("PROXY_CHANGE_URL")
+            # Загрузка актуальных значений из ENV
+            for (section, key), env_var in env_map.items():
+                val = os.getenv(env_var)
+                if val:
+                    sec_data = raw_cfg.setdefault(section, {})
+                    if "ids" in key: # Обработка списков ID
+                        sec_data[key] = [int(i.strip()) for i in val.split(",") if i.strip()]
+                    else:
+                        sec_data[key] = val
+                else:
+                    # Если переменной нет в ENV, а в конфиге стоит заглушка ENV_VAR — сбрасываем
+                    sec_data = raw_cfg.setdefault(section, {})
+                    current = sec_data.get(key)
+                    if current == "ENV_VAR":
+                        if "ids" in key:
+                            sec_data[key] = []
+                        else:
+                            sec_data[key] = ""
 
             self.data = AppConfig(**raw_cfg)
-            logger.debug("Configuration loaded and validated with Pydantic")
+            logger.debug("Конфигурация загружена и валидирована")
         
         except ValidationError as e:
-            logger.error(f"❌ Configuration Validation Error:\n{e}")
-            # Не прерываем работу, чтобы можно было увидеть ошибку
+            logger.error(f"❌ Ошибка валидации конфигурации:\n{e}")
         except Exception as e:
-            logger.error(f"Error loading config: {e}")
+            logger.error(f"Ошибка при загрузке конфигурации: {e}")
+
+    def _update_env_file(self, env_vars: Dict[str, str]):
+        """Обновляет значения переменных в .env файле, сохраняя комментарии и структуру."""
+        env_path = self.path.parent / ".env"
+        lines = []
+        if env_path.exists():
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        
+        new_lines = []
+        updated_vars = set()
+        
+        for line in lines:
+            if "=" in line and not line.strip().startswith("#"):
+                key = line.split("=", 1)[0].strip()
+                if key in env_vars:
+                    new_lines.append(f"{key}={env_vars[key]}\n")
+                    updated_vars.add(key)
+                    # Обновляем os.environ, чтобы изменения были видны сразу
+                    os.environ[key] = str(env_vars[key])
+                    continue
+            new_lines.append(line)
+            
+        for key, val in env_vars.items():
+            if key not in updated_vars:
+                new_lines.append(f"{key}={val}\n")
+                os.environ[key] = str(val)
+                
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
 
     def save(self, new_config: dict | AppConfig):
+        """Сохраняет новую конфигурацию, разделяя секреты (.env) и публичные данные (json)."""
         try:
             if isinstance(new_config, AppConfig):
                 dump = new_config.model_dump()
             else:
-                dump = new_config
+                # Глубокое копирование, чтобы не менять оригинал при маскировке
+                dump = json.loads(json.dumps(new_config))
             
-            # Mask secret token if it matches the one in ENV
-            env_token = os.getenv("TG_TOKEN")
-            if env_token and dump.get("telegram", {}).get("token") == env_token:
-                 dump["telegram"]["token"] = "ENV_VAR"
+            env_map = {
+                ("telegram", "token"): "TG_TOKEN",
+                ("telegram", "user_ids"): "TG_USER_IDS",
+                ("telegram", "owner_ids"): "TG_OWNER_IDS",
+                ("scraper", "proxy_url"): "PROXY_URL",
+                ("scraper", "proxy_change_url"): "PROXY_CHANGE_URL",
+            }
             
+            to_env = {}
+            for (section, key), env_var in env_map.items():
+                val = dump.get(section, {}).get(key)
+                if val is not None:
+                    if isinstance(val, list):
+                        to_env[env_var] = ",".join(map(str, val))
+                    else:
+                        to_env[env_var] = str(val)
+                    
+                    # Маскируем в дампе для config.json
+                    if section in dump:
+                        dump[section][key] = "ENV_VAR"
+            
+            # Сохраняем в .env
+            if to_env:
+                self._update_env_file(to_env)
+            
+            # Сохраняем нечувствительные данные в config.json
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(dump, f, indent=2, ensure_ascii=False)
             
             self.reload()
             return True
         except Exception as e:
-            logger.error(f"Error saving config: {e}")
+            logger.error(f"Ошибка при сохранении конфигурации: {e}")
             return False
 
 
