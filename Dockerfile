@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     fonts-liberation \
     ffmpeg \
+    shadowsocks-libev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -32,6 +33,9 @@ WORKDIR /app
 # Копируем requirements.txt отдельно для эффективного кеширования слоев
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Предварительная загрузка модели Whisper (вшиваем в образ)
+RUN python -c 'from faster_whisper import WhisperModel; WhisperModel("base", device="cpu", compute_type="int8", download_root="/app/models/whisper")'
 
 # Установка Playwright (Chromium) - пропускаем установку зависимостей (сделано выше)
 RUN playwright install chromium

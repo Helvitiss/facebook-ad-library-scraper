@@ -223,9 +223,14 @@ class Exporter:
         """Запускает транскрибацию всех найденных видеофайлов."""
         if Exporter._whisper_model is None:
             try:
-                # Используем tiny для скорости, если нужна база — поменяйте обратно
-                # Но для скорости перевода обычно достаточно base или даже tiny
-                Exporter._whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+                # Используем заранее загруженную модель из образа
+                model_path = "/app/models/whisper" if Path("/app/models/whisper").exists() else None
+                Exporter._whisper_model = WhisperModel(
+                    "base", 
+                    device="cpu", 
+                    compute_type="int8", 
+                    download_root=model_path
+                )
             except Exception as e:
                 logger.error(f"Не удалось инициализировать Whisper: {e}")
                 return

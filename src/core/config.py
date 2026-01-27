@@ -110,6 +110,18 @@ class Config:
                             sec_data[key] = ""
 
             self.data = AppConfig(**raw_cfg)
+            
+            # Интеграция ShadowSocks
+            from src.core.proxy_manager import proxy_manager_instance
+            proxy_url = self.data.scraper.proxy_url
+            if proxy_url and proxy_url.startswith("ss://"):
+                if proxy_manager_instance.start_shadowsocks(proxy_url):
+                    # Подменяем внутренний URL на локальный SOCKS5 мост
+                    self.data.scraper.proxy_url = "socks5://127.0.0.1:1080"
+                    logger.info("Трафик перенаправлен на локальный ShadowSocks мост")
+            else:
+                proxy_manager_instance.stop()
+
             logger.debug("Конфигурация загружена и валидирована")
         
         except ValidationError as e:

@@ -476,7 +476,8 @@ async def main(urls: List[str] = None):
     """Точка входа для запуска парсинга списка URL."""
     scraper = Scraper()
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        proxy_settings = {"server": scraper.proxy} if scraper.proxy else None
+        browser = await p.chromium.launch(headless=True, proxy=proxy_settings)
         results_dir = Path("Parser_Results") / datetime.now().strftime("%Y%m%d_%H%M%S")
         results_dir.mkdir(parents=True, exist_ok=True)
         

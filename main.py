@@ -38,3 +38,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped by user")
+    finally:
+        from src.core.proxy_manager import proxy_manager_instance
+        proxy_manager_instance.stop()
