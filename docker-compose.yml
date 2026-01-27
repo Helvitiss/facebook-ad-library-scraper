@@ -1,12 +1,34 @@
 services:
   bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: fb_scraper_bot
     restart: always
-    volumes:
-      - .:/app
-      - /app/.venv  # Avoid mounting local venv into container
-      - /app/__pycache__ # Avoid mounting local cache
+    stop_grace_period: 30s
+
+    # Environment variables from .env file
+    env_file:
+      - .env
+
+    # Optional: Override/Add specific env vars
     environment:
       - PYTHONUNBUFFERED=1
-    # Use .env file for sensitive data if needed, otherwise it picks up config.json
+      # - PROXY_URL=...
+
+      # Персистентность (сохранение данных)
+    volumes:
+      # Монтирование папок с результатами на хост
+      - ./Exporter_Results:/app/Exporter_Results
+      - ./Parser_Results:/app/Parser_Results
+      # Монтирование конфига для горячей замены (требует перезапуска бота)
+      - ./config.json:/app/config.json
+      # Явный проброс .env (если класс Config читает его напрямую)
+      - ./.env:/app/.env
+
+    # Настройка логирования
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

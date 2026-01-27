@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install system dependencies manually (adapted for Debian/ARM/Raspberry Pi)
+# Установка системных зависимостей (вручную для лучшей совместимости)
 RUN apt-get update && apt-get install -y \
     libnss3 \
     libnspr4 \
@@ -30,17 +30,17 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy requirements first for better caching
+# Копируем requirements.txt отдельно для эффективного кеширования слоев
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers (Chromium) - skip install-deps as we did it manually
+# Установка Playwright (Chromium) - пропускаем установку зависимостей (сделано выше)
 RUN playwright install chromium
 
-# Copy the rest of the application
+# Копирование остального кода приложения
 COPY . .
 
-# Create necessary directories
+# Создание необходимых директорий для результатов
 RUN mkdir -p Parser_Results Exporter_Results
 
 CMD ["python", "main.py"]
