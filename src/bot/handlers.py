@@ -5,9 +5,11 @@ from aiogram.types import Message
 from loguru import logger
 
 from src.core.config import config_instance as config
-from src.bot.utils import process_task
+from src.bot.utils import process_task, process_kw_task
 from src.bot.settings import router as settings_router, is_user
-from src.bot.keyboards import get_main_settings_kb
+from src.bot.keyboards import get_main_settings_kb, get_cancel_kb
+from src.bot.states import KWState
+from aiogram.fsm.context import FSMContext
 
 router = Router()
 router.include_router(settings_router)
@@ -79,6 +81,45 @@ async def handle_url(message: Message):
     status = await message.answer(initial_text)
     
     await queue.put((message, status, url))
+
+@router.message(Command("kw"))
+async def cmd_kw(message: Message, state: FSMContext):
+    """Обработчик команды /kw. Запрашивает поиск ключевых слов."""
+    if not is_user(message.from_user.id): return
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) > 1:
+        # Если URL передан сразу
+        url = args[1].strip()
+        await process_kw_task(message, url)
+    else:
+        # Если URL не передан, запрашиваем через FSM
+        await state.set_state(KWState.waiting_for_url)
+        await message.answer(
+            "Отправьте ссылку на сайт, из которого нужно извлечь ключевые слова.",
+            reply_markup=get_cancel_kb()
+        )
+
+@router.message(F.text.regexp(r'(?i)^kw\s+(https?://\S+)'))
+async def handle_kw_text(message: Message):
+    """Перехватчик сообщений вида 'KW http...'."""
+    if not is_user(message.from_user.id): return
+    match = re.search(r'kw\s+(https?://\S+)', message.text, re.I)
+    if match:
+        url = match.group(1).strip()
+        await process_kw_task(message, url)
+
+@router.message(KWState.waiting_for_url)
+async def process_kw_url_step(message: Message, state: FSMContext):
+    """Шаг FSM: получение URL для извлечения KW."""
+    if not is_user(message.from_user.id): return
+    
+    url = message.text.strip()
+    if not url.startswith("http"):
+        return await message.answer("Пожалуйста, отправьте корректную ссылку (начинающуюся с http/https).")
+    
+    await state.clear()
+    await process_kw_task(message, url)
 
 async def start_worker():
     """Запускает асинхронный воркер обработки очереди."""

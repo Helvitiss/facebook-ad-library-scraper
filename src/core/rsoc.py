@@ -140,13 +140,16 @@ class RSOCExtractor:
             else:
                 # fallback - создаем свой клиент, если внешний не передан
                 async with httpx.AsyncClient(**self.client_kwargs) as client:
+                    logger.debug(f"RSOC: Запрос к {url} (proxy: {self.proxy})")
                     response = await client.get(url)
+                    logger.debug(f"RSOC: Ответ от {url} -> {response.status_code} (len: {len(response.text)})")
+                    
                     for history_resp in response.history:
                         all_keywords.extend(self.extract_from_url(str(history_resp.url)))
                     all_keywords.extend(self.extract_from_url(str(response.url)))
                     all_keywords.extend(self.extract_from_html(response.text))
         except Exception as e:
-            logger.warning(f"Ошибка при обработке ссылки {url}: {e}")
+            logger.error(f"RSOC: Критическая ошибка при обработке ссылки {url}: {e}")
         
         unique_results = []
         seen = set()
@@ -247,8 +250,11 @@ class RSOCExtractor:
         # Извлечение из JWT токенов, зашитых в HTML (скрипты, конфиги)
         keywords.extend(self.extract_from_jwt(html))
         
+        # 1. Поиск в data-атрибутах
         data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries)\s*=\s*[\"\']([^\"\']+)[\"\']'
         keywords.extend(self._split_keywords(re.findall(data_attr_pattern, html, re.I)))
+        
+        # 2. Поиск в JSON-подобных структурах по ключам
         for key in self.SEARCH_KEYS:
             patterns = [
                 rf'[\"\']{key}[\"\']\s*[:=]\s*[\"\']([^\"\']+)[\"\']',
@@ -258,4 +264,16 @@ class RSOCExtractor:
             for pattern in patterns:
                 for match in re.findall(pattern, html, re.I):
                     keywords.extend(self._split_keywords(match))
+        
+        # 3. Новое: Извлечение из meta keywords
+        meta_kw = re.search(r'<meta\s+name=["\']keywords["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+        if meta_kw:
+            keywords.extend(self._split_keywords(meta_kw.group(1)))
+            
+        # 4. Новое: Извлечение из заголовка (title)
+        title = re.search(r'<title>(.*?)</title>', html, re.I | re.S)
+        if title:
+            # Титл обычно содержит 1-2 фразы, попробуем их тоже взять если они валидны
+            keywords.extend(self._split_keywords(title.group(1).strip()))
+            
         return keywords

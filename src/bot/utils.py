@@ -14,6 +14,7 @@ from loguru import logger
 from src.core.config import config_instance as config
 from src.core.scraper import main as scraper_main
 from src.core.exporter import main as exporter_main
+from src.core.rsoc import RSOCExtractor
 
 class TelegramLogHandler:
     """Перехватчик логов для отправки их в сообщение Telegram (status message)."""
@@ -200,3 +201,51 @@ async def process_task(original_message: Message, status_message: Message, url: 
         await original_message.answer(f"Ошибка обработки: {e}")
     finally:
         logger.remove(sink_id)
+
+async def process_kw_task(message: Message, url: str):
+    """
+    Обрабатывает запрос на извлечение ключевых слов из ссылки.
+    """
+    status = await message.answer("🔍 Извлечение ключевых слов... Пожалуйста, подождите.")
+    
+    try:
+        # Инициализация экстрактора с прокси из конфига
+        proxy_url = config.data.scraper.proxy_url or None
+        extractor = RSOCExtractor(proxy=proxy_url)
+        
+        # Получаем ключевые слова
+        keywords = await extractor.process_link(url)
+        logger.info(f"KW Task: Извлечено {len(keywords)} слов из {url}")
+        
+        if not keywords:
+            return await status.edit_text("❌ Ключевые слова не найдены на этой странице или доступ заблокирован.\n\n<i>Проверьте, не защищен ли сайт Cloudflare или другими системами защиты.</i>", parse_mode="HTML")
+        
+        # Сортировка и форматирование результата
+        keywords.sort()
+        
+        result_text = f"✅ <b>Найденные ключевые слова ({len(keywords)}):</b>\n\n"
+        
+        # Все ключевые слова в одном моноширинном блоке через новую строку
+        # Тег <pre> в Telegram создает блок, который копируется целиком одним нажатием
+        all_kw_str = "\n".join(keywords)
+        result_text += f"<pre>{all_kw_str}</pre>"
+        
+        # Если текст слишком длинный для одного сообщения (лимит TG ~4096 симв)
+        if len(result_text) > 4000:
+            # Можно отправить файлом или разбить, отправим файлом для надежности
+            file_path = f"keywords_{int(time.time())}.txt"
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(keywords))
+            
+            await message.reply_document(
+                document=FSInputFile(file_path),
+                caption=f"✅ Найдено {len(keywords)} ключевых слов (отправлено файлом из-за объема)."
+            )
+            os.remove(file_path)
+            await status.delete()
+        else:
+            await status.edit_text(result_text, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.exception(f"KW extraction error for {url}")
+        await status.edit_text(f"❌ Произошла ошибка при извлечении: {e}")
