@@ -113,7 +113,7 @@ PROXY_URL=http://username:password@ip:port    # (Опционально) Гло�
 ## Структура проекта
 
 ```
-sin sobaky/
+facebook-ad-library-scraper/
 ├──  src/
 │   ├──  bot/               # Логика Telegram бота
 │   │   ├── handlers.py       # Обработчики команд
