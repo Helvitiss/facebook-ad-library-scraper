@@ -23,8 +23,8 @@ class RSOCExtractor:
         "related_terms", "relatedQueries", "related_queries", "recommendations", 
         "recommendedTerms", "recommended_terms", "recommendedQueries", 
         "recommended_queries", "seedKeywords", "seed_keywords", "seedTerms", "seed_terms",
-        "p", "v", "tid", "click_id", "cid", "subid", "subid1", "subid2", "ad_id", "campaign_id",
-        "tkn", "token", "session", "jwt", "payload", "data"
+        "p", "tid", "click_id", "cid", "subid", "subid1", "subid2", "ad_id", "campaign_id",
+        "tkn", "token", "session", "jwt", "payload"
     }
 
     # Структурные / контекстные ключи только для рекурсии
@@ -46,7 +46,10 @@ class RSOCExtractor:
         "redirect", "android", "iphone", "ipad", "linux", "google", "bing", "yahoo",
         "ad_blocked", "device_type", "platform_name", "track_id", "channel", 
         "city", "country", "lang", "language", "network", "target_url", "dest",
-        "hs256", "jwt", "unknown", "none"
+        "hs256", "jwt", "unknown", "none", "unrestrictedsharedarraybuffer", 
+        "sharedarraybuffer", "arraybuffer", "dataview", "uint8array", "uint16array", 
+        "uint32array", "int8array", "int16array", "int32array", "float32array", 
+        "float64array", "biguint64array", "bigint64array", "cryptokey", "cryptokeypair"
     }
 
     SPLIT_PATTERN = r'[,|;\n]|\s*\|\|\s*|\s*::\s*'
@@ -66,12 +69,18 @@ class RSOCExtractor:
         # Инициализация гео-данных
         self.countries = {c.name.lower(): c.name for c in pycountry.countries}
         
+        # Исключаем очень распространенные слова, которые часто путают с городами
+        geo_ignore = {
+            "para", "bank", "kredi", "news", "best", "total", "link", "info", "data",
+            "online", "shop", "store", "home", "back", "next", "page", "user"
+        }
+        
         gc = geonamescache.GeonamesCache()
         cities = gc.get_cities()
         self.cities = {
             c['name'].lower() 
             for c in cities.values() 
-            if c['population'] > 15000 and len(c['name']) > 2
+            if c['population'] > 15000 and len(c['name']) > 2 and c['name'].lower() not in geo_ignore
         }
 
     def _sanitize_geo(self, text: str) -> str:
@@ -106,9 +115,31 @@ class RSOCExtractor:
         if re.search(r'[=+\*<>;]', s_lower): return False
         if s.startswith('_') or s.startswith('$'): return False
         if "window" in s_lower or "document" in s_lower: return False
+        
         # Фильтрация длинных непонятных строк (хеши, ID), если они не содержат пробелов
-        if len(s) > 20 and " " not in s and re.search(r'[0-9]', s): return False
+        if len(s) > 20 and " " not in s:
+            # Если это одно слово длиннее 20 символов и содержит цифры -> вероятно ID
+            if re.search(r'[0-9]', s): return False
+            # Если это очень длинное слово (более 35 симв) без пробелов -> вероятно техническое
+            if len(s) > 35: return False
+            
         return True
+
+    def _unquote_fully(self, text: str) -> str:
+        """Рекурсивно декодирует URL-строку до тех пор, пока она не перестанет меняться."""
+        if not isinstance(text, str) or not text: return text
+        try:
+            import urllib.parse
+            last = ""
+            current = text
+            # Максимум 3 итерации, чтобы не попасть в цикл
+            for _ in range(3):
+                last = current
+                current = urllib.parse.unquote(current)
+                if current == last: break
+            return current
+        except:
+            return text
 
     def _split_keywords(self, text: Any) -> list[str]:
         if not text: return []
@@ -119,6 +150,10 @@ class RSOCExtractor:
                     results.extend(self._split_keywords(item))
                 return results
             return []
+        
+        # Полное декодирование перед обработкой
+        text = self._unquote_fully(text)
+        
         parts = re.split(self.SPLIT_PATTERN, text)
         cleaned = []
         for p in parts:
