@@ -22,9 +22,9 @@
   "facebook_api": {
     "endpoint_url": "https://www.facebook.com/api/graphql/",
     "doc_ids": {
-      "pagination": "123456789",
-      "collation": "123456789",
-      "creative_info": "123456789"
+      "pagination": "24327448546944337",
+      "collation": "23975586852034580",
+      "creative_info": "8457623231028231"
     }
   },
   "telegram": {
