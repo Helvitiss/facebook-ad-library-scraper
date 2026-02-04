@@ -83,6 +83,20 @@ class RSOCExtractor:
             if c['population'] > 15000 and len(c['name']) > 2 and c['name'].lower() not in geo_ignore
         }
 
+    def _is_search_key(self, key: str) -> bool:
+        """Проверяет, является ли ключ поисковым (с учетом нумерации типа kw1, term2)."""
+        k_lower = key.lower()
+        if k_lower in self.SEARCH_KEYS or "rsoc" in k_lower:
+            return True
+        
+        # Проверка на нумерованные вариации (kw1, q2, term3 и т.д.)
+        for sk in self.SEARCH_KEYS:
+            if k_lower.startswith(sk):
+                suffix = k_lower[len(sk):]
+                if suffix.isdigit():
+                    return True
+        return False
+
     def _sanitize_geo(self, text: str) -> str:
         if not text: return text
         words = text.split()
@@ -205,7 +219,7 @@ class RSOCExtractor:
             parsed = urlparse(url)
             params = parse_qs(parsed.query)
             for key, values in params.items():
-                if key.lower() in self.SEARCH_KEYS or "rsoc" in key.lower():
+                if self._is_search_key(key):
                     for val in values:
                         keywords.extend(self._split_keywords(val))
                 for val in values:
@@ -259,7 +273,7 @@ class RSOCExtractor:
             for k, v in data.items():
                 k_lower = k.lower()
                 # 1. Если ключ известный — берем его содержимое (обычно это строки с разделителями)
-                if k_lower in self.SEARCH_KEYS or "rsoc" in k_lower:
+                if self._is_search_key(k_lower):
                     extracted.extend(self._split_keywords(v))
                     # Если ключ совпал, не переходим к агрессивному захвату для этого же значения
                     continue
