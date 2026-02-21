@@ -15,7 +15,7 @@ class RSOCExtractor:
     # Ключи с высокой вероятностью содержащие поисковые фразы
     SEARCH_KEYS = {
         "utm_term", "utm_terms", "term", "terms", "keyword", "keywords", "kw", "kws", 
-        "query", "queries", "q", "qs", "search", "search_term", "search_terms", 
+        "q", "qs", "search", "search_term", "search_terms", 
         "searchQuery", "searchQueries", "rsoc", "keywordList", "keyword_list", 
         "kw_list", "kwList", "termList", "term_list", "queryList", "query_list", 
         "suggestions", "suggests", "suggestedTerms", "suggested_terms", 
@@ -24,7 +24,7 @@ class RSOCExtractor:
         "recommendedTerms", "recommended_terms", "recommendedQueries", 
         "recommended_queries", "seedKeywords", "seed_keywords", "seedTerms", "seed_terms",
         "p", "tid", "click_id", "cid", "subid", "subid1", "subid2", "ad_id", "campaign_id",
-        "tkn", "token", "session", "jwt", "payload"
+        "tkn", "token", "session", "jwt", "payload", "AB_VERSION_TERMS", "terms_list"
     }
 
     # Структурные / контекстные ключи только для рекурсии
@@ -34,7 +34,8 @@ class RSOCExtractor:
         "cardItems", "blocks", "widgets", "modules", "sections", "config", "pageConfig", 
         "page_config", "appConfig", "app_config", "settings", "options", "params", 
         "state", "initialState", "initial_state", "hydration", "__INITIAL_STATE__", 
-        "__NEXT_DATA__", "__NUXT__", "pageData", "searchConfig", "search_config"
+        "__NEXT_DATA__", "__NUXT__", "pageData", "searchConfig", "search_config",
+        "query", "queries"
     }
 
     # Технический шум, который всегда игнорируется
@@ -49,7 +50,8 @@ class RSOCExtractor:
         "hs256", "jwt", "unknown", "none", "unrestrictedsharedarraybuffer", 
         "sharedarraybuffer", "arraybuffer", "dataview", "uint8array", "uint16array", 
         "uint32array", "int8array", "int16array", "int32array", "float32array", 
-        "float64array", "biguint64array", "bigint64array", "cryptokey", "cryptokeypair"
+        "float64array", "biguint64array", "bigint64array", "cryptokey", "cryptokeypair",
+        "organicItemsList", "ko_oil"
     }
 
     SPLIT_PATTERN = r'[,|;\n]|\s*\|\|\s*|\s*::\s*'
@@ -285,7 +287,8 @@ class RSOCExtractor:
                 # 3. Агрессивный захват: если значение - строка и похожа на запрос
                 elif isinstance(v, str) and self._is_valid_keyword(v.strip()):
                     # Избегаем захвата чисто технических ID и HEX
-                    if not re.match(r'^[a-f0-9_\-\.]{15,}$', v.strip().lower()):
+                    # И игнорируем, если ключ входит в BLACKLIST структур
+                    if not re.match(r'^[a-f0-9_\-\.]{15,}$', v.strip().lower()) and k not in self.BLACKLIST:
                         extracted.append(self._sanitize_geo(v.strip()))
                         
         elif isinstance(data, list):
@@ -300,7 +303,7 @@ class RSOCExtractor:
         keywords.extend(self.extract_from_jwt(html))
         
         # 1. Поиск в data-атрибутах
-        data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries)\s*=\s*[\"\']([^\"\']+)[\"\']'
+        data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries|item-title|title)\s*=\s*[\"\']([^\"\']+)[\"\']'
         keywords.extend(self._split_keywords(re.findall(data_attr_pattern, html, re.I)))
         
         # 2. Поиск в JSON-подобных структурах по ключам
