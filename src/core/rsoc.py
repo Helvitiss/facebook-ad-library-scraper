@@ -127,7 +127,7 @@ class RSOCExtractor:
         if len(s) > 120: return False
         if s.isdigit() or re.match(r'^[a-f0-9]{20,}$', s_lower): return False
         if re.search(r'[pbs]_\d{3,}', s_lower): return False
-        if re.search(r'0x[0-9a-f]+|[\[\]\(\)\{\}]', s_lower): return False
+        if re.search(r'0x[0-9a-f]+|[\(\)\{\}]', s_lower): return False
         if re.search(r'[=+\*<>;]', s_lower): return False
         if s.startswith('_') or s.startswith('$'): return False
         if "window" in s_lower or "document" in s_lower: return False
@@ -321,11 +321,5 @@ class RSOCExtractor:
         meta_kw = re.search(r'<meta\s+name=["\']keywords["\']\s+content=["\']([^"\']+)["\']', html, re.I)
         if meta_kw:
             keywords.extend(self._split_keywords(meta_kw.group(1)))
-            
-        # 4. Новое: Извлечение из заголовка (title)
-        title = re.search(r'<title>(.*?)</title>', html, re.I | re.S)
-        if title:
-            # Титл обычно содержит 1-2 фразы, попробуем их тоже взять если они валидны
-            keywords.extend(self._split_keywords(title.group(1).strip()))
             
         return keywords
