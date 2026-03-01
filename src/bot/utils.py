@@ -133,16 +133,18 @@ async def process_task(original_message: Message, status_message: Message, url: 
                 with open(details_file, "r", encoding="utf-8") as f:
                     content = f.read()
                 
-                link_match = re.search(r'Link:\s*(.+)', content)
+                link_match = re.search(r'Link:\s*(https?://[^\s\n]+)', content)
                 if not link_match: continue
                 link = link_match.group(1).strip()
                 
                 domain = await get_final_domain(link)
                 if not domain or domain == "N/A": continue
                 
+                # Поиск охватов (строго по старому формату Total: \d+)
                 reach_match = re.search(r'Total:\s*(\d+)', content)
                 reach = int(reach_match.group(1)) if reach_match else 0
                 
+                # Поиск затрат (строго по старому формату Spend: \$[0-9.]+)
                 spend_match = re.search(r'Spend:\s*\$([0-9.]+)', content)
                 spend = float(spend_match.group(1)) if spend_match else 0.0
                 

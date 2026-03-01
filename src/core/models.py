@@ -8,6 +8,8 @@ class GraphQLPage:
     raw_creatives: list = field(default_factory=list)
     variables: Optional[dict] = None
     doc_id: Optional[str] = None
+    cookies: Dict[str, str] = field(default_factory=dict)
+    lsd: Optional[str] = None
 
 @dataclass
 class Creative:

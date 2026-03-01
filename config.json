@@ -1,8 +1,10 @@
 {
   "scraper": {
-    "concurrent_requests": 50,
+    "concurrent_requests": 30,
     "retries_per_creative": 5,
     "url_workers": 3,
+    "browser_type": "firefox",
+    "scroll_iterations": 10,
     "proxy_url": "ENV_VAR",
     "proxy_change_url": "ENV_VAR"
   },
@@ -15,16 +17,16 @@
     "image_filename": "Creative.jpg",
     "results_base_dir": "Exporter_Results",
     "retry_delay_seconds": 5,
-    "min_reaches": 1000,
+    "min_reaches": 0,
     "min_reaches_eu": 0,
     "min_reaches_uk": 0
   },
   "facebook_api": {
     "endpoint_url": "https://www.facebook.com/api/graphql/",
     "doc_ids": {
-      "pagination": "24327448546944337",
+      "pagination": "25987067537594875",
       "collation": "23975586852034580",
-      "creative_info": "8457623231028231"
+      "creative_info": "6635716889819821"
     }
   },
   "telegram": {

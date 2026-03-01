@@ -15,6 +15,8 @@ class ScraperConfig(BaseModel):
     concurrent_requests: int = 45
     retries_per_creative: int = 5
     url_workers: int = 3
+    browser_type: str = "chromium"
+    scroll_iterations: int = 3
     proxy_url: Optional[str] = ""
     proxy_change_url: Optional[str] = ""
 

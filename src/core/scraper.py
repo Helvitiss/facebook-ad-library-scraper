@@ -24,11 +24,14 @@ class RateLimitExceededError(Exception):
 class GraphQLClient:
     """Клиент для взаимодействия с GraphQL API Facebook."""
     
-    def __init__(self, http_client: httpx.AsyncClient, endpoint_url: str, doc_ids: dict):
+    def __init__(self, http_client: httpx.AsyncClient, endpoint_url: str, doc_ids: dict, cookies: dict = None, lsd: str = None):
         self.client = http_client
         self.endpoint_url = endpoint_url
         self.doc_ids = doc_ids
         self.initial_variables = {}
+        self.lsd = lsd
+        if cookies:
+            self.client.cookies.update(cookies)
 
     async def fetch_all_creatives(self, initial_page: GraphQLPage) -> list:
         """Собирает все объявления, проходя по всем страницам пагинации."""
@@ -55,8 +58,12 @@ class GraphQLClient:
         logger.debug(f"Начальная страница: найдено {len(all_creatives)} элементов")
         
         next_page = initial_page
+        logger.info(f"Начало пагинации. Стартовый курсор: {next_page.cursor}")
+        
         while next_page.cursor:
+            logger.debug(f"Запрос следующей страницы с курсором: {next_page.cursor[:20]}...")
             next_page = await self._fetch_next_page(next_page)
+            
             if next_page.raw_creatives:
                 for chunk in next_page.raw_creatives:
                     if not chunk: continue
@@ -76,16 +83,40 @@ class GraphQLClient:
         for i in range(config.data.scraper.retries_per_creative):
             try:
                 vars_ = self.initial_variables.copy()
+                # Форсируем лимит, чтобы не застревать на порциях по 6 штук
+                for limit_key in ["count", "first", "limit"]:
+                    if limit_key in vars_:
+                        vars_[limit_key] = 30
+                
                 vars_["cursor"] = current_page.cursor
                 doc_id = current_page.doc_id or self.doc_ids["pagination"]
                 payload = {"variables": json.dumps(vars_), "doc_id": doc_id}
+                if self.lsd: payload["lsd"] = self.lsd
+                
+                logger.debug(f"GQL Payload: doc_id={doc_id}, variables keys={list(vars_.keys())}")
                 
                 await config.IP_READY_EVENT.wait()
                 resp = await self.client.post(self.endpoint_url, data=payload)
-                resp.raise_for_status()
                 
-                data = resp.json()
-                return GraphQLPage(cursor=extract_cursor(data), raw_creatives=extract_creatives_from_pagination(data))
+                # Сохраняем дамп для отладки, если пагинация вернула пустоту или мало данных
+                if resp.status_code == 200:
+                    data = resp.json()
+                    new_creatives = extract_creatives_from_pagination(data)
+                    new_cursor = extract_cursor(data)
+                    
+                    logger.debug(f"GQL Response: status={resp.status_code}, found_creatives={len(new_creatives)}, new_cursor={new_cursor}")
+                    
+                    # Если данных нет или мало, дампим ответ для анализа структуры
+                    if not new_creatives:
+                        dump_path = Path("tmp_gql_dumps")
+                        dump_path.mkdir(exist_ok=True)
+                        with open(dump_path / f"pagination_empty_{int(datetime.now().timestamp())}.json", "w", encoding="utf-8") as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+                        logger.warning(f"Пустая пагинация дампирована в {dump_path}")
+
+                    return GraphQLPage(cursor=new_cursor, raw_creatives=new_creatives)
+                
+                resp.raise_for_status()
             except (httpx.ConnectError, httpx.ProxyError, httpx.HTTPError) as e:
                 is_conn = isinstance(e, (httpx.ConnectError, httpx.ProxyError))
                 wait = (2 ** i) + 1 if is_conn else 1
@@ -101,6 +132,7 @@ class GraphQLClient:
             vars_["collationGroupID"] = collation_id
             vars_["forwardCursor"] = next_cursor
             payload = {"variables": json.dumps(vars_), "doc_id": self.doc_ids["collation"]}
+            if self.lsd: payload["lsd"] = self.lsd
             
             for i in range(config.data.scraper.retries_per_creative):
                 try:
@@ -131,6 +163,7 @@ class GraphQLClient:
         vars_ = self.initial_variables.copy()
         vars_["adArchiveID"] = ad_id
         payload = {"variables": json.dumps(vars_), "doc_id": self.doc_ids["creative_info"]}
+        if self.lsd: payload["lsd"] = self.lsd
         
         await config.IP_READY_EVENT.wait()
         resp = await self.client.post(self.endpoint_url, data=payload)
@@ -222,61 +255,107 @@ class Scraper:
                     await page.goto(url, wait_until="load", timeout=45000)
                     
                     # Небольшая пауза перед скроллом для стабильности контекста
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
                     
-                    # Прокрутка для активации (с защитой от разрушения контекста)
-                    for _ in range(3):
+                    # Улучшенная прокрутка для гарантированного перехвата GQL
+                    scroll_iterations = getattr(config.data.scraper, "scroll_iterations", 3)
+                    logger.debug(f"Запуск прокрутки: {scroll_iterations} итераций")
+                    
+                    for s in range(scroll_iterations):
                         try:
                             if page.is_closed(): break
-                            await page.evaluate("window.scrollBy(0, 1000)")
-                            await asyncio.sleep(0.6)
+                            # Скроллим на разную высоту для имитации поведения пользователя
+                            distance = 1000 + (s * 200)
+                            await page.evaluate(f"window.scrollBy(0, {distance})")
+                            # Случайная пауза для загрузки контента
+                            await asyncio.sleep(0.8 + (s % 2) * 0.4)
+                            
+                            if (s + 1) % 5 == 0:
+                                logger.debug(f"Прокрутка: итерация {s+1}/{scroll_iterations}...")
                         except: break
                     
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(3000)
+
+                    best_page = GraphQLPage()
+                    max_creatives = 0
 
                     for resp in gql_responses:
                         try:
-                            # Проверяем статус ответа перед попыткой парсинга
-                            if resp.status != 200:
-                                continue
+                            if resp.status != 200: continue
                                 
                             data = await resp.json()
                             raw = extract_creatives(data)
-                            if raw:
-                                req_body = resp.request.post_data
-                                vars_ = extract_variables(req_body)
-                                
-                                # Извлекаем doc_id из тела запроса (JSON или form-urlencoded)
-                                doc_id = None
-                                try:
-                                    req_json = resp.request.post_data_json
-                                    if req_json: doc_id = str(req_json.get("doc_id", ""))
-                                except: pass
-                                
-                                if not doc_id and isinstance(req_body, str):
-                                    from urllib.parse import parse_qs
-                                    params = parse_qs(req_body)
-                                    doc_id = params.get("doc_id", [None])[0]
+                            if not raw: continue
 
-                                logger.info(f"Данные успешно перехвачены из GQL для {url} (doc_id: {doc_id})")
-                                return GraphQLPage(
+                            # Считаем количество найденных креативов
+                            creatives_count = len(raw)
+                            logger.debug(f"Найдено {creatives_count} креативов в GQL ответе")
+
+                            req_body = resp.request.post_data
+                            vars_ = extract_variables(req_body)
+                            
+                            # Извлекаем doc_id
+                            doc_id = None
+                            try:
+                                req_json = resp.request.post_data_json
+                                if req_json: doc_id = str(req_json.get("doc_id", ""))
+                            except: pass
+                            
+                            if not doc_id and isinstance(req_body, str):
+                                from urllib.parse import parse_qs
+                                params = parse_qs(req_body)
+                                doc_id = params.get("doc_id", [None])[0]
+
+                            # Если этот ответ содержит больше данных или мы еще ничего не нашли
+                            if creatives_count > max_creatives or (creatives_count > 0 and not best_page.raw_creatives):
+                                max_creatives = creatives_count
+                                best_page = GraphQLPage(
                                     cursor=extract_cursor(data), 
                                     raw_creatives=raw, 
                                     variables=vars_,
                                     doc_id=doc_id
                                 )
+                                logger.debug(f"Выбран лучший GQL ответ (креативов: {max_creatives}, doc_id: {doc_id})")
                         except Exception as e:
                             logger.debug(f"GQL Parse Error for {url}: {e}")
+
+                    # [NEW] Извлечение сессионных данных (Cookies и LSD)
+                    import re
+                    html_content = await page.content()
+                    lsd_match = re.search(r'["\']LSD["\'],\[\],\{["\']token["\']:["\']([^"\']+)["\']\}', html_content)
+                    lsd_token = lsd_match.group(1) if lsd_match else None
+                    if not lsd_token:
+                        lsd_match = re.search(r'["\']lsd["\']:["\']([^"\']+)["\']', html_content)
+                        lsd_token = lsd_match.group(1) if lsd_match else None
+                    
+                    cookies = {c["name"]: c["value"] for c in await page.context.cookies()}
+                    logger.debug(f"Сессия получена: LSD={lsd_token[:10] if lsd_token else 'None'}..., Cookies count={len(cookies)}")
+
+                    if best_page.raw_creatives:
+                        best_page.lsd = lsd_token
+                        best_page.cookies = cookies
+                        logger.info(f"Данные успешно перехвачены из GQL для {url} (всего {max_creatives} креативов)")
+                        return best_page
                     
                     # Пытаемся сразу найти данные в HTML, если GQL не сработал или не полон
                     logger.debug(f"GQL не дал результатов для {url}, пробуем парсить HTML...")
-                    html_content = await page.content()
                     info = extract_script_info(html_content)
                     if info:
                         creatives = extract_creatives(info)
                         if creatives:
-                            logger.info(f"Данные успешно извлечены из скриптов HTML для {url}")
-                            return GraphQLPage(raw_creatives=creatives, variables=extract_variables(info))
+                            logger.info(f"Данные успешно извлечены из скриптов HTML для {url} (всего {len(creatives)} креативов)")
+                            vars_ = extract_variables(info)
+                            if not vars_ or not (vars_.get("view_all_page_id") or vars_.get("viewAllPageID")):
+                                logger.debug(f"Скрипты не дали переменных для {url}, пробуем URL fallback...")
+                                vars_ = extract_variables(url)
+                            
+                            return GraphQLPage(
+                                cursor=extract_cursor(info),
+                                raw_creatives=creatives, 
+                                variables=vars_, 
+                                lsd=lsd_token, 
+                                cookies=cookies
+                            )
 
                 except Exception as e:
                     logger.warning(f"Попытка инициализации {i+1} для {url} не удалась: {e}")
@@ -335,6 +414,7 @@ class Scraper:
 
         res = await asyncio.gather(*[_proc_chunk(c) for c in raw_creatives])
         final_groups = [g for g in res if g and g.creatives]
+        
         logger.success(f"Успешно обработано {len(final_groups)} групп объявлений")
         return final_groups
 
@@ -384,11 +464,22 @@ class Scraper:
             if pending:
                 logger.error(f"Не удалось обогатить {len(pending)} объявлений после {max_global_retries} глобальных попыток.")
 
-        # Запускаем RSOC и Reaches одновременно
-        await asyncio.gather(
-            _run_enrichment(),
-            *[self._proc_rsoc(g, extractor, gql_client.client) for g in groups if g.link_url]
-        )
+        # Обогащаем группы данными о просмотрах (reaches)
+        await _run_enrichment()
+
+        # После того как данные загружены, извлекаем link_url для групп, у которых его еще нет
+        for g in groups:
+            if not g.link_url and g.creatives:
+                for c in g.creatives:
+                    if c.transparency_data:
+                        details = c.transparency_data.get("ad_library_main", {}).get("ad_details", {})
+                        if link := details.get("link_url"):
+                            g.link_url = link
+                            break
+
+        # Теперь можно запускать RSOC, так как у нас появились ссылки
+        extractor = RSOCExtractor(proxy=self.proxy)
+        await asyncio.gather(*[self._proc_rsoc(g, extractor, gql_client.client) for g in groups if g.link_url])
 
         # Агрегация охватов выполняется ПОСЛЕ того, как все данные получены
         self._aggregate_reaches(groups)
@@ -403,8 +494,16 @@ class Scraper:
                         raise RateLimitExceededError()
                         
                     creative.transparency_data = res.get("data", {})
-                    if creative.transparency_data:
-                        logger.debug(f"Данные для {creative.ad_archive_id} получены успешно.")
+                    if not creative.transparency_data:
+                        logger.warning(f"Facebook вернул пустые данные (data is empty) для {creative.ad_archive_id}")
+                    else:
+                         # Логируем наличие ключа aaa_info для отладки "пропавших просмотров"
+                         ad_dt = creative.transparency_data.get("ad_library_main", {}).get("ad_details", {})
+                         has_aaa = "aaa_info" in ad_dt
+                         has_tpl = "transparency_by_location" in ad_dt
+                         logger.debug(f"Детали для {creative.ad_archive_id} получены. AAA: {has_aaa}, TPL: {has_tpl}")
+                         if not has_aaa and not has_tpl:
+                             logger.debug(f"Keys in details: {list(ad_dt.keys())}")
                     return
                 except (RateLimitExceededError, httpx.ConnectError, httpx.RequestError) as e:
                     is_conn_error = isinstance(e, (httpx.ConnectError, httpx.ProxyError))
@@ -424,45 +523,91 @@ class Scraper:
             raise Exception(f"Не удалось получить детали для {creative.ad_archive_id} после {config.data.scraper.retries_per_creative} попыток")
 
     def _aggregate_reaches(self, groups: List[AdGroup]):
-        """Суммирует данные об охватах по странам (EU и UK)."""
+        """Суммирует данные об охватах по всем доступным регионам (глобально)."""
         total_found = 0
         for group in groups:
-            eu_map, uk_map = {}, {}
+            reaches_map = {}
             for c in group.creatives:
                 if not c.transparency_data: continue
                 
                 try:
                     ad_details = c.transparency_data.get("ad_library_main", {}).get("ad_details", {})
+                    
+                    # 1. Пробуем новую структуру aaa_info (часто встречается в последних версиях FB)
+                    aaa_info = ad_details.get("aaa_info", {})
+                    if aaa_info:
+                        eu_reach = aaa_info.get("eu_total_reach")
+                        if isinstance(eu_reach, (int, float)) and eu_reach > 0:
+                            reaches_map["EU_TOTAL"] = reaches_map.get("EU_TOTAL", 0) + int(eu_reach)
+                            total_found += int(eu_reach)
+                        
+                        breakdown = aaa_info.get("age_country_gender_reach_breakdown", [])
+                        if breakdown:
+                            for country_dict in breakdown:
+                                country = country_dict.get("country")
+                                if not country: continue
+                                summary = 0
+                                for bd_item in country_dict.get("age_gender_breakdowns", []):
+                                    summary += sum(bd_item.get(g, 0) or 0 for g in ("male", "female", "unknown"))
+                                if summary > 0:
+                                    reaches_map[country] = reaches_map.get(country, 0) + summary
+                                    total_found += summary
+
+                    # 2. Пробуем классическую структуру transparency_by_location
                     transparency = ad_details.get("transparency_by_location", {})
-                    if not transparency: continue
+                    if not transparency and not aaa_info:
+                        logger.debug(f"Transparency/AAA missing for {c.ad_archive_id}. Keys: {list(ad_details.keys())}")
+                        continue
 
-                    for region_code in ("eu", "uk"):
-                        reg_data = transparency.get(f"{region_code}_transparency")
-                        if not reg_data: continue
-
-                        breakdown = reg_data.get("age_country_gender_reach_breakdown", [])
-                        for country_dict in breakdown:
-                            country = country_dict.get("country")
-                            if not country: continue
-
-                            summary = 0
-                            for bd_item in country_dict.get("age_gender_breakdowns", []):
-                                summary += sum(bd_item.get(g, 0) or 0 for g in ("male", "female", "unknown"))
+                    if transparency:
+                        # Ищем все ключи, оканчивающиеся на _transparency
+                        for key, reg_data in transparency.items():
+                            if not key.endswith("_transparency") or not reg_data: continue
                             
-                            if summary > 0:
-                                target_map = eu_map if region_code == "eu" else uk_map
-                                target_map[country] = target_map.get(country, 0) + summary
-                                total_found += summary
+                            logger.debug(f"Parsing transparency for {c.ad_archive_id}, region: {key}")
+
+                            breakdown = reg_data.get("age_country_gender_reach_breakdown", [])
+                            if breakdown:
+                                for country_dict in breakdown:
+                                    country = country_dict.get("country")
+                                    if not country: continue
+
+                                    summary = 0
+                                    for bd_item in country_dict.get("age_gender_breakdowns", []):
+                                        summary += sum(bd_item.get(g, 0) or 0 for g in ("male", "female", "unknown"))
+                                    
+                                    if summary > 0:
+                                        reaches_map[country] = reaches_map.get(country, 0) + summary
+                                        total_found += summary
+                            else:
+                                # Резервный поиск любых числовых данных об охвате для этого региона
+                                # Например, в estimated_audience_size или impressions
+                                for fallback_key in ("estimated_audience_size", "impressions", "reach"):
+                                    if val := reg_data.get(fallback_key):
+                                        # val может быть числом или словарем с min/max
+                                        amount = 0
+                                        if isinstance(val, (int, float)): amount = int(val)
+                                        elif isinstance(val, dict): amount = val.get("upper_bound") or val.get("lower_bound") or 0
+                                        
+                                        if amount > 0:
+                                            region_label = key.replace("_transparency", "").upper()
+                                            reaches_map[region_label] = reaches_map.get(region_label, 0) + amount
+                                            total_found += amount
+                                            break
                                 
                 except Exception as e:
                     logger.error(f"Ошибка агрегации статистики для {c.ad_archive_id}: {e}")
-
-            group.total_reaches = {"eu": eu_map, "uk": uk_map}
+            
+            # Сохраняем результат в группу
+            group.total_reaches = reaches_map
+            group_sum = sum(v for v in reaches_map.values() if isinstance(v, (int, float)))
+            if group_sum > 0:
+                logger.debug(f"Группа {group.collation_id or 'single'} агрегирована: {group_sum} охватов")
         
         if total_found == 0:
-            logger.warning("Агрегация: охваты не найдены. Facebook вернул пустые данные или иное ГЕО.")
+            logger.warning("Агрегация: охваты не найдены ни в одном объявлении.")
         else:
-            logger.info(f"Агрегация завершена. Суммарный охват: {total_found}")
+            logger.info(f"Агрегация завершена. Суммарный охват всех групп: {total_found}")
 
     async def _proc_rsoc(self, group: AdGroup, extractor: RSOCExtractor, http_client: httpx.AsyncClient):
         """Парсит ключевые слова RSOC по ссылке."""
@@ -476,8 +621,17 @@ async def main(urls: List[str] = None):
     """Точка входа для запуска парсинга списка URL."""
     scraper = Scraper()
     async with async_playwright() as p:
+        browser_type_name = getattr(config.data.scraper, "browser_type", "chromium").lower()
+        logger.info(f"Запуск браузера: {browser_type_name}")
+        
         proxy_settings = {"server": scraper.proxy} if scraper.proxy else None
-        browser = await p.chromium.launch(headless=True, proxy=proxy_settings)
+        
+        if browser_type_name == "firefox":
+            browser = await p.firefox.launch(headless=True, proxy=proxy_settings)
+        elif browser_type_name == "webkit":
+            browser = await p.webkit.launch(headless=True, proxy=proxy_settings)
+        else:
+            browser = await p.chromium.launch(headless=True, proxy=proxy_settings)
         results_dir = Path("Parser_Results") / datetime.now().strftime("%Y%m%d_%H%M%S")
         results_dir.mkdir(parents=True, exist_ok=True)
         
@@ -494,7 +648,13 @@ async def main(urls: List[str] = None):
                 # Оставляем запас для других запросов
                 limits = httpx.Limits(max_keepalive_connections=conn_limit, max_connections=conn_limit + 10)
                 async with httpx.AsyncClient(proxy=scraper.proxy, timeout=30, limits=limits, follow_redirects=True) as client:
-                    gql = GraphQLClient(client, config.data.facebook_api.endpoint_url, config.data.facebook_api.doc_ids)
+                    gql = GraphQLClient(
+                        client, 
+                        config.data.facebook_api.endpoint_url, 
+                        config.data.facebook_api.doc_ids,
+                        cookies=init.cookies,
+                        lsd=init.lsd
+                    )
                     raw = await gql.fetch_all_creatives(init)
                     if not raw:
                         logger.warning(f"Объявления не найдены для {url}. Пропуск.")
@@ -504,15 +664,22 @@ async def main(urls: List[str] = None):
                     await scraper.enrich_groups(groups, gql)
                     
                     data_file = results_dir / f"data_{int(datetime.now().timestamp())}.json"
-                    with open(data_file, "w", encoding="utf-8") as f:
-                        json.dump({url: {g.link_url or f"group_{idx}": {
+                    output_data = []
+                    for idx, g in enumerate(groups):
+                        output_data.append({
+                            "search_url": url,
+                            "ad_url": g.collation_id or (f"ad_{g.creatives[0].ad_archive_id}" if g.creatives else f"group_{idx}"),
+                            "link_url": g.link_url,
                             "video_urls": [v for c in g.creatives for v in c.video_urls],
                             "img_urls": [i for c in g.creatives for i in c.image_urls],
                             "ad_texts": list({c.text for c in g.creatives if c.text}),
-                            "total_reaches": g.total_reaches or {"eu": {}, "uk": {}},
+                            "total_reaches": g.total_reaches or {},
                             "rsoc_keywords": g.rsoc_keywords,
                             "start_date": g.creatives[0].start_date if g.creatives else None
-                        } for idx, g in enumerate(groups)}}, f, ensure_ascii=False, indent=2)
+                        })
+                    
+                    with open(data_file, "w", encoding="utf-8") as f:
+                        json.dump(output_data, f, ensure_ascii=False, indent=2)
                         
             return str(results_dir)
         finally:

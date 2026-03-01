@@ -37,9 +37,13 @@ def extract_creatives(data: Any):
     return recursively_extract_value(data, "collated_results")
 
 def extract_cursor(data: dict):
-    """Находит курсор пагинации (end_cursor) в данных."""
-    result = recursively_extract_value(data, "end_cursor")
-    return result[0] if result else None
+    """Находит курсор пагинации (end_cursor) в данных, выбирая непустой."""
+    results = recursively_extract_value(data, "end_cursor")
+    from loguru import logger
+    if results: logger.debug(f"Found potential cursors: {results}")
+    for res in results:
+        if res and isinstance(res, str): return res
+    return None
 
 def extract_variables(data: Any):
     """Извлекает переменные запроса (variables) для последующих вызовов API."""
@@ -62,12 +66,27 @@ def extract_variables(data: Any):
             if json_data: return extract_variables(json_data)
 
         # 3. Пробуем как query string / form-data (URL параметры)
-        from urllib.parse import parse_qs
-        params = parse_qs(data)
+        from urllib.parse import parse_qs, urlparse
+        parsed_url = urlparse(data)
+        params = parse_qs(parsed_url.query if parsed_url.query else data)
+        
         vars_str = params.get("variables", [None])[0]
         if vars_str:
             try: return json.loads(vars_str)
-            except: return None
+            except: pass
+            
+        # Fallback: пробуем собрать переменные из отдельных параметров URL
+        fallback_vars = {}
+        if pid := params.get("view_all_page_id", [None])[0]: fallback_vars["viewAllPageID"] = pid
+        if ad_type := params.get("ad_type", [None])[0]: fallback_vars["adType"] = ad_type.upper()
+        if country := params.get("country", [None])[0]: fallback_vars["countries"] = [country]
+        if status := params.get("active_status", [None])[0]: fallback_vars["activeStatus"] = status
+        
+        if fallback_vars:
+            # Базовые значения для пагинации
+            fallback_vars.update({"first": 30, "cursor": None, "searchType": "page", "sortData": {"mode": "SORT_BY_TOTAL_IMPRESSIONS", "direction": "DESCENDING"}})
+            return fallback_vars
+            
         return None
         
     results = recursively_extract_value(data, "variables")
@@ -76,10 +95,10 @@ def extract_variables(data: Any):
         if isinstance(val, str):
             try: 
                 parsed = json.loads(val)
-                if isinstance(parsed, dict) and (parsed.get("ad_type") or parsed.get("q")):
+                if isinstance(parsed, dict) and (parsed.get("ad_type") or parsed.get("q") or parsed.get("view_all_page_id")):
                     return parsed
             except: continue
-        elif isinstance(val, dict) and (val.get("ad_type") or val.get("q")):
+        elif isinstance(val, dict) and (val.get("ad_type") or val.get("q") or val.get("view_all_page_id")):
             return val
             
     return results[0] if results and results[0] else None
@@ -114,8 +133,5 @@ def extract_text(creative_dict: dict):
     return body.get("text")
 
 def extract_creatives_from_pagination(data: dict):
-    """Извлекает креативы из ответа пагинации GraphQL."""
-    try:
-        edges = data["data"]["ad_library_main"]["search_results_connection"]["edges"]
-        return [edge["node"]["collated_results"] for edge in edges if edge.get("node", {}).get("collated_results")]
-    except: return []
+    """Извлекает креативы из ответа пагинации GraphQL используя рекурсивный поиск."""
+    return recursively_extract_value(data, "collated_results")
