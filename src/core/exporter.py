@@ -12,7 +12,10 @@ import threading
 from loguru import logger
 from faster_whisper import WhisperModel
 from deep_translator import GoogleTranslator
-from langdetect import detect
+from langdetect import detect, DetectorFactory
+
+# Устанавливаем seed для детерминированных результатов определения языка
+DetectorFactory.seed = 0
 
 from src.core.config import config_instance as config
 
@@ -23,6 +26,11 @@ class Exporter:
         self.results_dir: Optional[Path] = None
         self.http_client: Optional[httpx.Client] = None
         self.folder_lock = threading.Lock()
+        # Предварительная инициализация langdetect для избежания состояния гонки в потоках
+        try:
+            detect("")
+        except:
+            pass
 
     async def run(self, input_path: str | Path):
         """Запускает процесс экспорта данных из указанного JSON-дампа или папки с дампами."""
