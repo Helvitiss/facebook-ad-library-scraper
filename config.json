@@ -1,8 +1,8 @@
 {
   "scraper": {
-    "concurrent_requests": 30,
+    "concurrent_requests": 10,
     "retries_per_creative": 5,
-    "url_workers": 3,
+    "url_workers": 1,
     "browser_type": "firefox",
     "scroll_iterations": 10,
     "proxy_url": "ENV_VAR",
@@ -10,7 +10,7 @@
   },
   "exporter": {
     "max_retries": 5,
-    "exporter_workers": 20,
+    "exporter_workers": 10,
     "details_filename": "Details.txt",
     "transcription_filename": "Transcription.txt",
     "video_filename": "Creative.mp4",
