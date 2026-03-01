@@ -106,13 +106,24 @@ class GraphQLClient:
                     
                     logger.debug(f"GQL Response: status={resp.status_code}, found_creatives={len(new_creatives)}, new_cursor={new_cursor}")
                     
-                    # Если данных нет или мало, дампим ответ для анализа структуры
+                    # Проверка на наличие ошибок в ответе (например, Rate Limit)
+                    errors = data.get("errors", [])
+                    if errors:
+                        for err in errors:
+                            msg = err.get("message", "")
+                            if "Rate limit" in msg or err.get("code") == 1675004:
+                                logger.error("❌ Facebook ограничил запросы (Rate Limit). Попробуйте сменить IP или подождать 10-15 мин.")
+                            else:
+                                logger.warning(f"Ошибка GQL: {msg}")
+                        return GraphQLPage(cursor=None, raw_creatives=[])
+
+                    # Если данных нет или мало (структурная пустота), дампим для анализа
                     if not new_creatives:
                         dump_path = Path("tmp_gql_dumps")
                         dump_path.mkdir(exist_ok=True)
                         with open(dump_path / f"pagination_empty_{int(datetime.now().timestamp())}.json", "w", encoding="utf-8") as f:
                             json.dump(data, f, ensure_ascii=False, indent=2)
-                        logger.warning(f"Пустая пагинация дампирована в {dump_path}")
+                        logger.warning("Пагинация пуста. Возможно, достигнут конец списка или структура изменилась.")
 
                     return GraphQLPage(cursor=new_cursor, raw_creatives=new_creatives)
                 
