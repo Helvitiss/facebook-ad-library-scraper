@@ -51,7 +51,8 @@ class RSOCExtractor:
         "sharedarraybuffer", "arraybuffer", "dataview", "uint8array", "uint16array", 
         "uint32array", "int8array", "int16array", "int32array", "float32array", 
         "float64array", "biguint64array", "bigint64array", "cryptokey", "cryptokeypair",
-        "organicItemsList", "ko_oil"
+        "organicItemsList", "ko_oil", "privacy", "copyright", "terms", "about", "contact",
+        "support", "policy", "legal", "cookies", "advertising", "career", "feedback"
     }
 
     SPLIT_PATTERN = r'[,|;\n]|\s*\|\|\s*|\s*::\s*'
@@ -63,8 +64,12 @@ class RSOCExtractor:
             "follow_redirects": True,
             "proxy": self.proxy,
             "headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
             }
         }
         
@@ -122,9 +127,13 @@ class RSOCExtractor:
     def _is_valid_keyword(self, s: str) -> bool:
         if not s or len(s) < 3: return False
         s_lower = s.lower()
-        if s_lower in self.BLACKLIST: return False
-        if any(x in s_lower for x in ["://", "www.", ".com", ".net", ".org", ".php", ".js"]): return False
-        if len(s) > 120: return False
+        if any(x in s_lower for x in self.BLACKLIST): return False
+        
+        # Фильтрация URL, путей и расширений
+        if any(x in s_lower for x in ["://", "www.", ".com", ".net", ".org", ".php", ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".svg", ".json"]): return False
+        if s.startswith('/') or s.startswith('./') or s.startswith('../'): return False
+        
+        if len(s) > 100: return False # Слишком длинные строки обычно заголовки или тех. данные
         if s.isdigit() or re.match(r'^[a-f0-9]{20,}$', s_lower): return False
         if re.search(r'[pbs]_\d{3,}', s_lower): return False
         if re.search(r'0x[0-9a-f]+|[\(\)\{\}]', s_lower): return False
@@ -134,10 +143,8 @@ class RSOCExtractor:
         
         # Фильтрация длинных непонятных строк (хеши, ID), если они не содержат пробелов
         if len(s) > 20 and " " not in s:
-            # Если это одно слово длиннее 20 символов и содержит цифры -> вероятно ID
             if re.search(r'[0-9]', s): return False
-            # Если это очень длинное слово (более 35 симв) без пробелов -> вероятно техническое
-            if len(s) > 35: return False
+            if len(s) > 30: return False
             
         return True
 
@@ -180,27 +187,53 @@ class RSOCExtractor:
 
     async def process_link(self, url: str, http_client: Optional[httpx.AsyncClient] = None) -> list[str]:
         all_keywords = []
+        html_content = None
+        final_url = url
+        
         try:
+            used_urllib = False
             if http_client:
-                # Используем переданный клиент
-                response = await http_client.get(url)
-                for history_resp in response.history:
-                    all_keywords.extend(self.extract_from_url(str(history_resp.url)))
-                all_keywords.extend(self.extract_from_url(str(response.url)))
-                all_keywords.extend(self.extract_from_html(response.text))
-            else:
-                # fallback - создаем свой клиент, если внешний не передан
-                async with httpx.AsyncClient(**self.client_kwargs) as client:
-                    logger.debug(f"RSOC: Запрос к {url} (proxy: {self.proxy})")
-                    response = await client.get(url)
-                    logger.debug(f"RSOC: Ответ от {url} -> {response.status_code} (len: {len(response.text)})")
-                    
+                try:
+                    response = await http_client.get(url)
                     for history_resp in response.history:
                         all_keywords.extend(self.extract_from_url(str(history_resp.url)))
-                    all_keywords.extend(self.extract_from_url(str(response.url)))
-                    all_keywords.extend(self.extract_from_html(response.text))
+                    final_url = str(response.url)
+                    all_keywords.extend(self.extract_from_url(final_url))
+                    html_content = response.text
+                except Exception as e:
+                    logger.debug(f"RSOC: Внешний клиент httpx не смог обработать {url} ({e}), пробуем urllib...")
+                    used_urllib = True
+            else:
+                used_urllib = True
+
+            if used_urllib:
+                # ВАЖНО: Используем urllib, так как он обходит 406 ошибку на многих сайтах
+                import urllib.request
+                import urllib.parse
+                
+                logger.debug(f"RSOC: Запрос к {url} через urllib (proxy: {self.proxy})")
+                
+                proxy_handler = urllib.request.ProxyHandler({'http': self.proxy, 'https': self.proxy}) if self.proxy else urllib.request.ProxyHandler({})
+                opener = urllib.request.build_opener(proxy_handler)
+                
+                ua = self.client_kwargs["headers"]["User-Agent"]
+                req = urllib.request.Request(url, headers={'User-Agent': ua})
+                
+                def _fetch():
+                    with opener.open(req, timeout=15) as response:
+                        return response.geturl(), response.read().decode('utf-8', errors='ignore')
+
+                final_url, html_content = await asyncio.to_thread(_fetch)
+                
+                # Извлекаем данные из URL (если еще не извлекли или они изменились)
+                all_keywords.extend(self.extract_from_url(url))
+                all_keywords.extend(self.extract_from_url(final_url))
+
+            if html_content:
+                all_keywords.extend(self.extract_from_html(html_content, current_url=final_url))
+                
         except Exception as e:
-            logger.error(f"RSOC: Критическая ошибка при обработке ссылки {url}: {e}")
+            logger.warning(f"RSOC: Ошибка доступа/обработки ссылки {url} ({type(e).__name__}): {e}")
         
         unique_results = []
         seen = set()
@@ -297,29 +330,95 @@ class RSOCExtractor:
                 
         return extracted
 
-    def extract_from_html(self, html: str) -> list[str]:
+    def extract_from_html(self, html: str, current_url: Optional[str] = None) -> list[str]:
         keywords = []
-        # Извлечение из JWT токенов, зашитых в HTML (скрипты, конфиги)
+        if not html: return []
+        
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+        except Exception as e:
+            logger.debug(f"RSOC: Ошибка инициализации BeautifulSoup: {e}")
+            return []
+
+        # 0. Извлечение заголовков для фильтрации
+        page_title = soup.title.string.strip().lower() if soup.title and soup.title.string else ""
+        h1_tag = soup.find('h1')
+        h1_text = h1_tag.get_text(strip=True).lower() if h1_tag else ""
+        
+        # Определение базового домена для фильтрации "источников" (внешних ссылок)
+        base_domain = ""
+        if current_url:
+            try:
+                base_domain = urlparse(current_url).netloc
+            except: pass
+
+        # 1. Извлечение из JWT токенов (скрипты, конфиги)
         keywords.extend(self.extract_from_jwt(html))
         
-        # 1. Поиск в data-атрибутах
-        data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries|item-title|title)\s*=\s*[\"\']([^\"\']+)[\"\']'
+        # 2. Поиск в data-атрибутах
+        data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries)\s*=\s*[\"\']([^\"\']+)[\"\']'
         keywords.extend(self._split_keywords(re.findall(data_attr_pattern, html, re.I)))
         
-        # 2. Поиск в JSON-подобных структурах по ключам
+        # 3. Поиск в JSON-подобных структурах по ключам
         for key in self.SEARCH_KEYS:
             patterns = [
-                rf'[\"\']{key}[\"\']\s*[:=]\s*[\"\']([^\"\']+)[\"\']',
-                rf'[\"\']{key}[\"\']\s*[:=]\s*\[(.*?)\]',
-                rf'\b{key}\s*[:=]\s*[\"\']([^\"\']+)[\"\']'
+                rf'[\"\']{key}[\"\']\s*[:=]\s*[\"\']([^\"\']+)[\"\']', 
+                rf'[\"\']{key}[\"\']\s*[:=]\s*\[(.*?)\]',           
+                rf'\b{key}\s*[:=]\s*[\"\']([^\"\']+)[\"\']',        
+                rf'\b{key}\s*[:=]\s*\[(.*?)\]'                      
             ]
             for pattern in patterns:
                 for match in re.findall(pattern, html, re.I):
                     keywords.extend(self._split_keywords(match))
         
-        # 3. Новое: Извлечение из meta keywords
-        meta_kw = re.search(r'<meta\s+name=["\']keywords["\']\s+content=["\']([^"\']+)["\']', html, re.I)
-        if meta_kw:
-            keywords.extend(self._split_keywords(meta_kw.group(1)))
+        # 4. Извлечение только из meta keywords
+        meta_kw = soup.find('meta', attrs={'name': 'keywords'})
+        if meta_kw and meta_kw.get('content'):
+            keywords.extend(self._split_keywords(meta_kw['content']))
             
-        return keywords
+        # 5. Интеллектуальное извлечение ссылок (самое важное)
+        for a in soup.find_all('a'):
+            href = a.get('href', '')
+            text = a.get_text(strip=True)
+            if not text or len(text) < 5: continue
+            
+            # Фильтр 1: Внешние ссылки (источники) - ИГНОРИРУЕМ
+            if base_domain:
+                try:
+                    parsed_href = urlparse(href)
+                    if parsed_href.netloc and parsed_href.netloc != base_domain:
+                        continue
+                except: pass
+            elif href.startswith('http'): # Если нет базового домена, но ссылка абсолютная -> вероятно внешняя
+                continue
+
+            # Фильтр 2: Контекст (Sources, Resources и т.д.)
+            is_source_block = False
+            for parent in a.parents:
+                # Если в родителе есть заголовок со словами Source/Resource -> это не ключи
+                header = parent.find(['h1','h2','h3','h4','h5','h6'])
+                if header:
+                    h_text = header.get_text().lower()
+                    if any(x in h_text for x in ['source', 'resource', 'reference', 'additional', 'about', 'contact']):
+                        is_source_block = True
+                        break
+                # Если сам контейнер имеет подозрительный класс/id
+                container_id = (parent.get('id') or '').lower()
+                container_class = " ".join(parent.get('class') or []).lower()
+                if any(x in container_id or x in container_class for x in ['footer', 'nav', 'menu', 'sidebar', 'copyright']):
+                    is_source_block = True
+                    break
+            
+            if not is_source_block:
+                keywords.extend(self._split_keywords(text))
+
+        # Финальная фильтрация: убираем совпадения с заголовком/H1
+        filtered = []
+        for kw in keywords:
+            kw_low = kw.lower()
+            if page_title and kw_low == page_title: continue
+            if h1_text and kw_low == h1_text: continue
+            filtered.append(kw)
+            
+        return filtered

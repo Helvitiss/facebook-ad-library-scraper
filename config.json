@@ -1,8 +1,8 @@
 {
   "scraper": {
-    "concurrent_requests": 10,
+    "concurrent_requests": 40,
     "retries_per_creative": 5,
-    "url_workers": 1,
+    "url_workers": 5,
     "browser_type": "firefox",
     "scroll_iterations": 10,
     "proxy_url": "ENV_VAR",

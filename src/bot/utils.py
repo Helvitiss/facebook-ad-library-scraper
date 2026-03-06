@@ -16,6 +16,8 @@ from src.core.scraper import main as scraper_main
 from src.core.exporter import main as exporter_main
 from src.core.rsoc import RSOCExtractor
 
+import aiogram.exceptions
+
 class TelegramLogHandler:
     """Перехватчик логов для отправки их в сообщение Telegram (status message)."""
     def __init__(self, message: Message):
@@ -23,7 +25,7 @@ class TelegramLogHandler:
         self.loop = asyncio.get_running_loop()
         self.last_text = ""
         self.last_update_time = 0
-        self.cooldown = 1.5 # Задержка между обновлениями в секундах
+        self.cooldown = 3.0 # Увеличенная задержка между обновлениями в секундах
         self.update_task = None
         self.pending_text = None
         
@@ -68,6 +70,10 @@ class TelegramLogHandler:
             self.last_update_time = time.time()
             self.pending_text = None
             await self.message.edit_text(new_text)
+        except aiogram.exceptions.TelegramRetryAfter as e:
+            # Если словили флуд-контроль, увеличиваем задержку
+            self.cooldown = e.retry_after + 1.0
+            self.last_update_time = time.time()
         except Exception:
             pass
 
@@ -100,8 +106,8 @@ async def process_task(original_message: Message, status_message: Message, url: 
     3. Сбор статистики и упаковка результатов в ZIP.
     4. Отправка архива пользователю.
     """
-    tg_handler = TelegramLogHandler(status_message)
-    sink_id = logger.add(tg_handler.write, format="{level} | {message}", level="INFO", filter=lambda r: "aiogram" not in r["name"])
+    # tg_handler = TelegramLogHandler(status_message)
+    # sink_id = logger.add(tg_handler.write, format="{level} | {message}", level="INFO", filter=lambda r: "aiogram" not in r["name"])
     
     try:
         await status_message.edit_text("Сбор данных...")

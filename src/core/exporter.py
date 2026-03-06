@@ -138,7 +138,7 @@ class Exporter:
                         total_global += v
 
         # Фильтрация по минимальному охвату группы
-        if (total_global < config.data.exporter.min_reaches):
+        if total_global == 0 or total_global < config.data.exporter.min_reaches:
             logger.info(f"Группа {target_url} пропущена: охват ({total_global}) ниже порога")
             return None
 
