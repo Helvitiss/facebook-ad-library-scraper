@@ -98,3 +98,10 @@ def get_list_remove_kb(section: str, key: str, items: list):
 def get_cancel_kb():
     """Возвращает кнопку отмены."""
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="cancel_edit")]])
+
+def get_edit_value_kb(section: str, key: str):
+    """Клавиатура при изменении параметра (с возможностью очистки)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Очистить (Удалить)", callback_data=f"set_clear:{section}:{key}")],
+        [InlineKeyboardButton(text="Отмена", callback_data="cancel_edit")]
+    ])

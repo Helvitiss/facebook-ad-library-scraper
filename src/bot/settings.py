@@ -7,7 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 from src.core.config import config_instance as config
 from src.bot.keyboards import (
     get_main_settings_kb, get_section_kb, get_list_menu_kb, 
-    get_list_remove_kb, get_cancel_kb, SECTION_ALIASES, KEY_ALIASES
+    get_list_remove_kb, get_cancel_kb, get_edit_value_kb, SECTION_ALIASES, KEY_ALIASES
 )
 
 router = Router()
@@ -65,7 +65,7 @@ async def cb_edit_value(callback: CallbackQuery, state: FSMContext):
     
     await state.update_data(section=section, key=key)
     await state.set_state(SettingsState.waiting_for_value)
-    await callback.message.edit_text(msg_text, reply_markup=get_cancel_kb(), parse_mode="HTML")
+    await callback.message.edit_text(msg_text, reply_markup=get_edit_value_kb(section, key), parse_mode="HTML")
 
 @router.callback_query(F.data == "cancel_edit")
 async def cb_cancel_edit(callback: CallbackQuery, state: FSMContext):
@@ -88,6 +88,10 @@ async def process_new_value(message: Message, state: FSMContext):
     try: val = json.loads(val_str)
     except: val = val_str
     
+    if key == "proxy_url" and isinstance(val, str) and val:
+        if not val.startswith(('http://', 'https://', 'socks4://', 'socks5://', 'ss://')):
+            val = f"http://{val}"
+    
     try:
         cfg = config.data.model_dump()
         cfg[section][key] = val
@@ -97,6 +101,26 @@ async def process_new_value(message: Message, state: FSMContext):
         await message.answer(f"Ошибка сохранения: {e}")
         
     await state.clear()
+
+@router.callback_query(F.data.startswith("set_clear:"))
+async def cb_clear_value(callback: CallbackQuery, state: FSMContext):
+    """Очищает значение параметра."""
+    parts = callback.data.split(":")
+    section, key = parts[1], ":".join(parts[2:])
+    
+    try:
+        cfg = config.data.model_dump()
+        cfg[section][key] = ""  # Устанавливаем пустую строку
+        config.save(cfg)
+        await callback.answer(f"Очищено {key}")
+        await state.clear()
+        
+        # Обновляем сообщение (возврат в список параметров)
+        label = SECTION_ALIASES.get(section, section.upper())
+        await callback.message.edit_text(f"<b>{label}</b>\nВыберите параметр для изменения:", 
+                                         reply_markup=get_section_kb(section), parse_mode="HTML")
+    except Exception as e:
+        await callback.answer(f"Ошибка очистки: {e}", show_alert=True)
 
 @router.callback_query(F.data.startswith("set_list_menu:"))
 async def cb_list_menu(callback: CallbackQuery):

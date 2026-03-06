@@ -83,8 +83,29 @@ def extract_variables(data: Any):
         if status := params.get("active_status", [None])[0]: fallback_vars["activeStatus"] = status
         
         if fallback_vars:
+            import uuid
             # Базовые значения для пагинации
-            fallback_vars.update({"first": 30, "cursor": None, "searchType": "page", "sortData": {"mode": "SORT_BY_TOTAL_IMPRESSIONS", "direction": "DESCENDING"}})
+            fallback_vars.update({
+                "first": 30, 
+                "cursor": None, 
+                "searchType": "page", 
+                "mediaType": "all",
+                "publisherPlatforms": [],
+                "pageIDs": [],
+                "bylines": [],
+                "contentLanguages": [],
+                "excludedIDs": None,
+                "isTargetedCountry": False,
+                "location": None,
+                "multiCountryFilterMode": None,
+                "potentialReachInput": None,
+                "queryString": "",
+                "regions": None,
+                "sessionID": str(uuid.uuid4()),
+                "startDate": None,
+                "v": "3ba1ef",
+                "sortData": {"mode": "SORT_BY_TOTAL_IMPRESSIONS", "direction": "DESCENDING"}
+            })
             return fallback_vars
             
         return None

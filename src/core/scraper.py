@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlparse
 
 import httpx
 from loguru import logger
@@ -635,8 +636,17 @@ async def main(urls: List[str] = None):
         browser_type_name = getattr(config.data.scraper, "browser_type", "chromium").lower()
         logger.info(f"Запуск браузера: {browser_type_name}")
         
-        proxy_settings = {"server": scraper.proxy} if scraper.proxy else None
-        
+        proxy_settings = None
+        if scraper.proxy:
+            parsed = urlparse(scraper.proxy)
+            proxy_settings = {
+                "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}" if parsed.port else f"{parsed.scheme}://{parsed.hostname}"
+            }
+            if parsed.username:
+                proxy_settings["username"] = parsed.username
+            if parsed.password:
+                proxy_settings["password"] = parsed.password
+                
         if browser_type_name == "firefox":
             browser = await p.firefox.launch(headless=True, proxy=proxy_settings)
         elif browser_type_name == "webkit":

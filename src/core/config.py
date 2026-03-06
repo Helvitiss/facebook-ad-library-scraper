@@ -111,6 +111,14 @@ class Config:
                         else:
                             sec_data[key] = ""
 
+            # Нормализация proxy_url перед загрузкой в модель
+            scraper_cfg = raw_cfg.get("scraper", {})
+            proxy_url = scraper_cfg.get("proxy_url", "")
+            if proxy_url and isinstance(proxy_url, str):
+                proxy_url = proxy_url.strip()
+                if proxy_url and not proxy_url.startswith(('http://', 'https://', 'socks4://', 'socks5://', 'ss://')):
+                    scraper_cfg["proxy_url"] = f"http://{proxy_url}"
+
             self.data = AppConfig(**raw_cfg)
             
             # Интеграция ShadowSocks
