@@ -21,6 +21,7 @@ class RSOCExtractor:
         "related_terms", "relatedQueries", "related_queries", "recommendations", 
         "recommendedTerms", "recommended_terms", "recommendedQueries", 
         "recommended_queries", "seedKeywords", "seed_keywords", "seedTerms", "seed_terms",
+        "query_terms",
         "p", "tid", "click_id", "cid", "subid", "subid1", "subid2", "ad_id", "campaign_id",
         "tkn", "token", "session", "jwt", "payload", "AB_VERSION_TERMS", "terms_list",
         "rac", "adtext"
@@ -135,10 +136,10 @@ class RSOCExtractor:
     def _skip_html_for_domain(self, url: str) -> bool:
         try:
             host = urlparse(url).netloc.lower()
-            return (
-                any(host == d or host.endswith(f".{d}") for d in self.TRACKER_DOMAINS)
-                or any(host == d or host.endswith(f".{d}") for d in self.NOISY_HTML_DOMAINS)
-            )
+            # Полностью пропускаем HTML только для явных tracker-доменов.
+            # Для остальных сайтов (включая noisy-домены) HTML нужен,
+            # чтобы доставать полезные ключи из head/script (например query_terms).
+            return any(host == d or host.endswith(f".{d}") for d in self.TRACKER_DOMAINS)
         except Exception:
             return False
 

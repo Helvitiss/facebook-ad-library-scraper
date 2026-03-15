@@ -201,12 +201,17 @@ def test_noise_keywords_filtered_in_process_link(monkeypatch, extractor):
     assert "function(t" not in kws
     assert "search_term_string" not in kws
 
-def test_process_link_skips_html_for_noisy_domains(extractor):
+def test_process_link_parses_query_terms_from_html_script(extractor):
     class Resp:
         def __init__(self):
             self.url = "https://gethappyday.com/asrsearch?search=test"
             self.history = []
-            self.text = '<script>window.top._googCsa.q="noise"</script>'
+            self.text = (
+                '<script>'
+                'window.top._googCsa.q="noise";'
+                'var cfg={"query_terms":"Graduate scholarships in Seoul,Seoul university scholarships"};'
+                '</script>'
+            )
 
         def raise_for_status(self):
             return None
@@ -217,6 +222,8 @@ def test_process_link_skips_html_for_noisy_domains(extractor):
 
     kws = asyncio.run(extractor.process_link("https://gethappyday.com/asrsearch?search=low+rent+studio+apartments", http_client=Client()))
     assert "low rent studio apartments" in kws
+    assert "Graduate scholarships in Seoul" in kws
+    assert "Seoul university scholarships" in kws
     assert "window.top._googCsa.q" not in kws
 
 def test_extract_from_url_rac_and_adtext(extractor):
