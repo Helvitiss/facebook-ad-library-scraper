@@ -317,3 +317,29 @@ def test_process_link_filters_ui_and_technical_noise(monkeypatch, extractor):
     assert "Terms of Service" not in kws
     assert "document.createElement(" not in kws
     assert "shopify-pixel" not in kws
+
+def test_extract_from_url_forcekey_alpha_suffix(extractor):
+    url = (
+        "https://adepty.co/real-estate/article/?utm_source=facebook"
+        "&forceKeyA=FHA+100+Dollar+Down+Payment+Program+Near+Me"
+        "&forceKeyB=HUD+Homes+100+Down+FHA+Eligible"
+        "&forceKeyC=First+Time+Homebuyer+FHA+100+Program"
+    )
+
+    kws = extractor.extract_from_url(url)
+    assert "FHA 100 Dollar Down Payment Program Near Me" in kws
+    assert "HUD Homes 100 Down FHA Eligible" in kws
+    assert "First Time Homebuyer FHA 100 Program" in kws
+
+
+def test_extract_from_url_does_not_treat_pub_as_search_key(extractor):
+    url = (
+        "https://example.com/?q=jeep+avenger+deals+2026"
+        "&pub=7639458541111112"
+        "&placement=Facebook_feed"
+    )
+
+    kws = extractor.extract_from_url(url)
+    assert "jeep avenger deals 2026" in kws
+    assert "7639458541111112" not in kws
+    assert "Facebook_feed" not in kws

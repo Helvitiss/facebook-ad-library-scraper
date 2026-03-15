@@ -22,7 +22,7 @@ class RSOCExtractor:
         "related_terms", "relatedQueries", "related_queries", "recommendations", 
         "recommendedTerms", "recommended_terms", "recommendedQueries", 
         "recommended_queries", "seedKeywords", "seed_keywords", "seedTerms", "seed_terms",
-        "query_terms",
+        "query_terms", "forcekey",
         "p", "tid", "click_id", "cid", "subid", "subid1", "subid2", "ad_id", "campaign_id",
         "tkn", "token", "session", "jwt", "payload", "AB_VERSION_TERMS", "terms_list",
         "rac", "adtext"
@@ -114,17 +114,28 @@ class RSOCExtractor:
 
 
     def _is_search_key(self, key: str) -> bool:
-        """Проверяет, является ли ключ поисковым (с учетом нумерации типа kw1, term2)."""
+        """Проверяет, является ли ключ поисковым (с учетом вариаций типа kw1 и forceKeyA)."""
         k_lower = key.lower()
         if k_lower in self.SEARCH_KEYS or "rsoc" in k_lower:
             return True
-        
-        # Проверка на нумерованные вариации (kw1, q2, term3 и т.д.)
+
+        # Для большинства ключей разрешаем только числовой суффикс (kw1, term2, q3).
+        # Буквенный суффикс поддерживаем только для forceKey* (forceKeyA, forceKeyB...),
+        # чтобы не матчить служебные параметры вроде pub (из-за базового ключа "p").
         for sk in self.SEARCH_KEYS:
-            if k_lower.startswith(sk):
-                suffix = k_lower[len(sk):]
-                if suffix.isdigit():
-                    return True
+            if not k_lower.startswith(sk):
+                continue
+
+            suffix = k_lower[len(sk):]
+            if not suffix:
+                continue
+
+            if suffix.isdigit():
+                return True
+
+            if sk == "forcekey" and suffix.isalpha():
+                return True
+
         return False
 
     def _is_tracker_domain(self, url: str) -> bool:
