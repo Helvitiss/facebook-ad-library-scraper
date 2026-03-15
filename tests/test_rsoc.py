@@ -266,3 +266,19 @@ def test_process_link_skips_html_if_original_is_tracker(extractor):
     kws = asyncio.run(extractor.process_link("https://track.topfindtoday.com/cf/r/69a6b6bd107b4900122c8a21", http_client=Client()))
     assert "useful keyword" in kws
     assert "bad noisy keyword" not in kws
+
+def test_extract_from_html_head_meta_keywords(extractor):
+    html = '''
+    <html>
+      <head>
+        <meta name="keywords" content="ayudante de montaje, desmontaje, eventos, logística, seguridad laboral" />
+        <meta property="og:keywords" content="ficha técnica, España" />
+      </head>
+      <body><div>ok</div></body>
+    </html>
+    '''
+
+    kws = extractor.extract_from_html(html, current_url="https://www.holvix.com/dsr?q=ayudante")
+    assert "ayudante de montaje" in kws
+    assert "desmontaje" in kws
+    assert "ficha técnica" in kws

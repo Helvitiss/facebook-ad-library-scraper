@@ -544,6 +544,25 @@ class RSOCExtractor:
         meta_kw = soup.find('meta', attrs={'name': 'keywords'})
         if meta_kw and meta_kw.get('content'):
             keywords.extend(self._split_keywords(meta_kw['content'], vetted=True))
+
+        # 5.1 Расширенное извлечение из head/meta по полям keywords/query/terms
+        # Нужнo для сайтов, где ключи лежат в <meta name="keywords" ...>
+        # или в property/itemprop вариациях.
+        head = soup.head
+        if head:
+            for meta in head.find_all('meta'):
+                key_name = (
+                    meta.get('name')
+                    or meta.get('property')
+                    or meta.get('itemprop')
+                    or ''
+                ).strip().lower()
+                content = (meta.get('content') or '').strip()
+                if not content:
+                    continue
+
+                if any(x in key_name for x in ('keyword', 'query_terms', 'query', 'terms')):
+                    keywords.extend(self._split_keywords(content, vetted=True))
             
         # 6. Поиск в произвольных атрибутах 'keywords' любого тега
         for tag in soup.find_all(True, attrs={"keywords": True}):
