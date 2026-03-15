@@ -56,6 +56,25 @@ def _collect_rsoc_by_link(result_dir: Path) -> dict[str, list[str]]:
 
     return normalized
 
+
+def _format_rsoc_by_link(grouped: dict[str, list[str]]) -> str:
+    """Форматирует RSOC-ключи по ссылкам в текст для отправки файлом."""
+    lines = []
+    total = 0
+    for i, (link, kws) in enumerate(grouped.items(), 1):
+        lines.append(f"{i}. Link: {link}")
+        if kws:
+            for k in kws:
+                lines.append(f"  - {k}")
+            total += len(kws)
+        else:
+            lines.append("  -")
+        lines.append("")
+
+    lines.append(f"Total links: {len(grouped)}")
+    lines.append(f"Total keywords: {total}")
+    return "\n".join(lines)
+
 class TelegramLogHandler:
     """Перехватчик логов для отправки их в сообщение Telegram (status message)."""
     def __init__(self, message: Message):
@@ -164,18 +183,16 @@ async def process_task(original_message: Message, status_message: Message, url: 
             if not grouped:
                 return await status_message.edit_text("Debug RSOC: ключи не найдены.")
 
-            blocks = []
-            total = 0
-            for i, (link, kws) in enumerate(grouped.items(), 1):
-                total += len(kws)
-                preview = "\n".join(f"  - {k}" for k in kws[:10])
-                more = f"\n  ... и еще {len(kws) - 10}" if len(kws) > 10 else ""
-                blocks.append(f"{i}. <code>{link}</code>\n{preview}{more}")
+            report_text = _format_rsoc_by_link(grouped)
+            report_path = Path(res_dir) / f"debug_rsoc_{int(time.time())}.txt"
+            report_path.write_text(report_text, encoding="utf-8")
 
             await status_message.edit_text(
-                f"Debug RSOC (до 50 объявлений): найдено <b>{total}</b> ключей в <b>{len(grouped)}</b> ссылках.\n\n"
-                + "\n\n".join(blocks[:20]),
-                parse_mode="HTML"
+                f"Debug RSOC: найдено {sum(len(v) for v in grouped.values())} ключей в {len(grouped)} ссылках. Отправляю TXT-файл..."
+            )
+            await original_message.answer_document(
+                document=FSInputFile(report_path),
+                caption="Debug RSOC: ключи по каждой ссылке лендинга"
             )
             return
 
