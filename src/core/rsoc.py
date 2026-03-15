@@ -349,6 +349,44 @@ class RSOCExtractor:
                 tokens.add(token)
         return tokens
 
+    def _extract_trusted_terms_from_url(self, url: str) -> set[str]:
+        """Извлекает доверенные ключи из query-параметров terms/terms_list."""
+        try:
+            params = parse_qs(urlparse(url).query)
+        except Exception:
+            return set()
+
+        trusted: set[str] = set()
+        for key in ("terms", "terms_list", "term_list", "query_terms"):
+            for raw in params.get(key, []):
+                for kw in self._split_keywords(raw, vetted=True):
+                    if kw:
+                        trusted.add(kw.lower())
+        return trusted
+
+    def _extract_trusted_terms_from_html(self, html: Optional[str]) -> set[str]:
+        """Извлекает доверенные ключи из JSON-массивов `terms` внутри HTML."""
+        if not html:
+            return set()
+
+        trusted: set[str] = set()
+        # Ищем фрагменты вида "terms": ["...", "..."]
+        for match in re.finditer(r"[\"']terms[\"']\s*:\s*(\[[^\]]{1,8000}\])", html, re.I | re.S):
+            arr_raw = match.group(1)
+            try:
+                values = json.loads(arr_raw)
+            except Exception:
+                continue
+            if not isinstance(values, list):
+                continue
+
+            for value in values:
+                for kw in self._split_keywords(value, vetted=True):
+                    if kw:
+                        trusted.add(kw.lower())
+
+        return trusted
+
     def _should_apply_context_filter(self, url: str) -> bool:
         """Контекстная фильтрация включается для adtext/rac-ссылок, где чаще всего есть шум."""
         try:
@@ -428,8 +466,12 @@ class RSOCExtractor:
         except Exception as e:
             logger.warning(f"RSOC: Ошибка доступа/обработки ссылки {url} ({type(e).__name__}): {e}")
         
-        context_tokens = self._extract_query_context_tokens(final_url or url)
-        apply_context_filter = self._should_apply_context_filter(final_url or url) and bool(context_tokens)
+        effective_url = final_url or url
+        context_tokens = self._extract_query_context_tokens(effective_url)
+        apply_context_filter = self._should_apply_context_filter(effective_url) and bool(context_tokens)
+        trusted_terms = self._extract_trusted_terms_from_url(effective_url)
+        trusted_terms.update(self._extract_trusted_terms_from_url(url))
+        trusted_terms.update(self._extract_trusted_terms_from_html(html_content))
 
         unique_results = []
         seen = set()
@@ -441,10 +483,11 @@ class RSOCExtractor:
             # Игнорируем голые плейсхолдеры
             if kw in ("{country}", "{city}", "{}"):
                 continue
-            if apply_context_filter and not self._is_context_relevant_keyword(kw, context_tokens):
+            kw_low = kw.lower()
+            if apply_context_filter and kw_low not in trusted_terms and not self._is_context_relevant_keyword(kw, context_tokens):
                 continue
 
-            low = kw.lower()
+            low = kw_low
             if low not in seen:
                 seen.add(low)
                 unique_results.append(kw)

@@ -382,3 +382,35 @@ def test_process_link_rac_context_filters_unrelated_keywords(extractor):
     assert "2025 volvo s60" not in kws
     assert "top suvs v1 fr" not in kws
     assert "best electric suv" not in kws
+
+
+def test_process_link_keeps_trusted_html_terms_under_context_filter(extractor):
+    class Resp:
+        def __init__(self):
+            self.url = (
+                "https://gethappyday.com/asrsearch?search=scholarships+to+study+in+seoul"
+                "&adtext=Read+more+about+Scholarships+to+Study+in+Seoul"
+            )
+            self.history = []
+            self.text = (
+                '<script>'
+                'var payload={"terms":["Study abroad scholarships Seoul",'
+                '"Scholarships for Korean universities","Graduate scholarships in Seoul"]};'
+                'var noise=["2025 volvo s60","top suvs v1 fr"];'
+                '</script>'
+            )
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            return Resp()
+
+    kws = asyncio.run(extractor.process_link("https://gethappyday.com/start", http_client=Client()))
+    assert "scholarships to study in seoul" in kws
+    assert "Study abroad scholarships Seoul" in kws
+    assert "Graduate scholarships in Seoul" in kws
+    assert "Scholarships for Korean universities" in kws
+    assert "2025 volvo s60" not in kws
+    assert "top suvs v1 fr" not in kws
