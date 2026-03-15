@@ -432,6 +432,34 @@ class Scraper:
         logger.success(f"Успешно обработано {len(final_groups)} групп объявлений")
         return final_groups
 
+    async def process_creatives_debug_rsoc_only(self, raw_creatives: list) -> List[AdGroup]:
+        """Облегченная обработка для debug mode: только link_url и ad_archive_id без загрузки крео/деталей."""
+        groups: List[AdGroup] = []
+        seen = set()
+
+        for chunk in raw_creatives:
+            if not chunk:
+                continue
+            data = chunk[0]
+            link_url = data.get("snapshot", {}).get("link_url")
+            ad_id = data.get("ad_archive_id")
+
+            if not link_url or not ad_id:
+                continue
+            if ad_id in seen:
+                continue
+            seen.add(ad_id)
+
+            groups.append(
+                AdGroup(
+                    link_url=link_url,
+                    creatives=[Creative(ad_archive_id=ad_id)]
+                )
+            )
+
+        logger.success(f"Debug RSOC mode: подготовлено {len(groups)} объявлений для проверки ключей")
+        return groups
+
     async def enrich_groups(self, groups: List[AdGroup], gql_client: GraphQLClient):
         """Обогащает группы данными о просмотрах (reaches) и ключевыми словами RSOC."""
         logger.info("Сбор детальной статистики (просмотры, ГЕО)...")
@@ -712,10 +740,15 @@ async def main(urls: List[str] = None):
                         
                     if config.data.debug_mode:
                         raw = raw[:50]
-                        logger.info(f"Отладочный режим: ограничение количества парсящихся объявлений до {len(raw)}")
-                        
-                    groups = await scraper.process_creatives(gql, raw)
-                    await scraper.enrich_groups(groups, gql)
+                        logger.info(f"Отладочный режим: ограничение количества объявлений до {len(raw)} и только проверка RSOC")
+                        groups = await scraper.process_creatives_debug_rsoc_only(raw)
+                        extractor = RSOCExtractor(proxy=scraper.proxy)
+                        rsoc_tasks = [scraper._proc_rsoc(g, extractor, gql.client) for g in groups if g.link_url]
+                        if rsoc_tasks:
+                            await asyncio.gather(*rsoc_tasks)
+                    else:
+                        groups = await scraper.process_creatives(gql, raw)
+                        await scraper.enrich_groups(groups, gql)
                     
                     data_file = results_dir / f"data_{int(datetime.now().timestamp())}.json"
                     output_data = []
