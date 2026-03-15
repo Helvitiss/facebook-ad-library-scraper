@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 from src.core.rsoc import RSOCExtractor
 
 @pytest.fixture
@@ -124,3 +125,34 @@ def test_extract_from_jwt_ignores_non_search_fields(extractor):
     assert "Ofertas Grandes Viajes 2026" in kws
     assert "Helsinki" not in kws
     assert "eGMzZDVtLnZmc2t6cWIuY29t" not in kws
+
+def test_process_link_keeps_url_keywords_when_network_fails(monkeypatch, extractor):
+    class BrokenOpener:
+        def open(self, *args, **kwargs):
+            raise OSError("network down")
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args, **kwargs: BrokenOpener())
+
+    url = "https://www.holvix.com/dsr?q=staplerfahrer+nachtschicht&asid=a26_ch623"
+    kws = asyncio.run(extractor.process_link(url))
+    assert "staplerfahrer nachtschicht" in kws
+
+def test_process_link_ignores_redirect_history_noise(extractor):
+    class Resp:
+        def __init__(self, url, history=None):
+            self.url = url
+            self.history = history or []
+            self.text = ""
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            history = [Resp("https://tracker.example/r?search=bad+noise")]
+            return Resp("https://landing.example/?search=good+keyword", history=history)
+
+    kws = asyncio.run(extractor.process_link("https://tracker.example/start", http_client=Client()))
+    assert "good keyword" in kws
+    assert "bad noise" not in kws

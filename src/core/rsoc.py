@@ -205,7 +205,9 @@ class RSOCExtractor:
         return cleaned
 
     async def process_link(self, url: str, http_client: Optional[httpx.AsyncClient] = None) -> list[str]:
-        all_keywords = []
+        # Всегда сначала извлекаем из исходного URL: даже если сеть/редирект недоступны,
+        # это сохраняет ключи из query (например q=...).
+        all_keywords = self.extract_from_url(url)
         html_content = None
         final_url = url
         
@@ -215,8 +217,6 @@ class RSOCExtractor:
                 try:
                     response = await http_client.get(url, headers=self.client_kwargs["headers"])
                     response.raise_for_status()
-                    for history_resp in response.history:
-                        all_keywords.extend(self.extract_from_url(str(history_resp.url)))
                     final_url = str(response.url)
                     all_keywords.extend(self.extract_from_url(final_url))
                     html_content = response.text
