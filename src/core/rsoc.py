@@ -475,6 +475,7 @@ class RSOCExtractor:
 
     def extract_from_html(self, html: str, current_url: Optional[str] = None) -> list[str]:
         keywords = []
+        head_keywords = []
         if not html: return []
         
         try:
@@ -496,54 +497,10 @@ class RSOCExtractor:
                 base_domain = urlparse(current_url).netloc
             except: pass
 
-        # 1. Извлечение из JWT токенов (скрипты, конфиги)
-        keywords.extend(self.extract_from_jwt(html))
-        
-        # 2. Поиск в data-атрибутах
-        data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries)\s*=\s*[\"\']([^\"\']+)[\"\']'
-        keywords.extend(self._split_keywords(re.findall(data_attr_pattern, html, re.I)))
-        
-        # 3. Поиск в JSON-подобных структурах по ключам во всем HTML (агрессивно)
-        for key in self.SEARCH_KEYS:
-            patterns = [
-                rf'[\"\']{key}[\"\']\s*[:=]\s*[\"\']([^\"\']+)[\"\']', 
-                rf'[\"\']{key}[\"\']\s*[:=]\s*\[(.*?)\]',           
-                rf'\b{key}\s*[:=]\s*[\"\']([^\"\']+)[\"\']',        
-                rf'\b{key}\s*[:=]\s*\[(.*?)\]',
-                rf'[\"\']{key}[\"\']\s*[:=]\s*(\d+)', # Для числовых ID, которые могут быть полезны
-            ]
-            for pattern in patterns:
-                for match in re.findall(pattern, html, re.I):
-                    if isinstance(match, str):
-                        keywords.extend(self._split_keywords(match, vetted=True))
-        
-        # 4. Поиск и парсинг всех скриптов как JSON
-        for script in soup.find_all('script'):
-            content = script.string
-            if not content or len(content) < 20: continue
-            
-            # Ищем что-то похожее на JSON внутри скрипта
-            json_matches = re.findall(r'(\{.*?\})', content, re.DOTALL)
-            for j_str in json_matches:
-                try:
-                    # Пытаемся почистить строку для json.loads (убираем JS комментарии и т.д. - упрощенно)
-                    clean_j = re.sub(r'//.*?\n', '', j_str)
-                    data = json.loads(clean_j)
-                    if isinstance(data, dict):
-                        keywords.extend(self._extract_from_dict(data))
-                except:
-                    # Если не JSON, пробуем искать ключи внутри строки этого блока
-                    for key in self.SEARCH_KEYS:
-                        if key in j_str:
-                            # Используем обычную строку для regex, чтобы не путаться с f-string скобками
-                            pattern = r'["\']?' + re.escape(key) + r'["\']?\s*[:=]\s*["\']?([^"\'\s,\]}]+)["\']?'
-                            m = re.search(pattern, j_str, re.I)
-                            if m: keywords.extend(self._split_keywords(m.group(1), vetted=True))
-        
         # 5. Извлечение только из meta keywords
         meta_kw = soup.find('meta', attrs={'name': 'keywords'})
         if meta_kw and meta_kw.get('content'):
-            keywords.extend(self._split_keywords(meta_kw['content'], vetted=True))
+            head_keywords.extend(self._split_keywords(meta_kw['content'], vetted=True))
 
         # 5.1 Расширенное извлечение из head/meta по полям keywords/query/terms
         # Нужнo для сайтов, где ключи лежат в <meta name="keywords" ...>
@@ -562,7 +519,52 @@ class RSOCExtractor:
                     continue
 
                 if any(x in key_name for x in ('keyword', 'query_terms', 'query', 'terms')):
-                    keywords.extend(self._split_keywords(content, vetted=True))
+                    head_keywords.extend(self._split_keywords(content, vetted=True))
+
+        # Если в head уже есть валидные ключи, используем их как приоритетный источник
+        # и не запускаем агрессивный парсинг всего HTML/скриптов (основной источник шума).
+        if head_keywords:
+            keywords.extend(head_keywords)
+        else:
+            # 1. Извлечение из JWT токенов (скрипты, конфиги)
+            keywords.extend(self.extract_from_jwt(html))
+            
+            # 2. Поиск в data-атрибутах
+            data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries)\s*=\s*[\"\']([^\"\']+)[\"\']'
+            keywords.extend(self._split_keywords(re.findall(data_attr_pattern, html, re.I)))
+            
+            # 3. Поиск в JSON-подобных структурах по ключам во всем HTML (агрессивно)
+            for key in self.SEARCH_KEYS:
+                patterns = [
+                    rf'[\"\']{key}[\"\']\s*[:=]\s*[\"\']([^\"\']+)[\"\']', 
+                    rf'[\"\']{key}[\"\']\s*[:=]\s*\[(.*?)\]',           
+                    rf'\b{key}\s*[:=]\s*[\"\']([^\"\']+)[\"\']',        
+                    rf'\b{key}\s*[:=]\s*\[(.*?)\]',
+                    rf'[\"\']{key}[\"\']\s*[:=]\s*(\d+)',
+                ]
+                for pattern in patterns:
+                    for match in re.findall(pattern, html, re.I):
+                        if isinstance(match, str):
+                            keywords.extend(self._split_keywords(match, vetted=True))
+            
+            # 4. Поиск и парсинг всех скриптов как JSON
+            for script in soup.find_all('script'):
+                content = script.string
+                if not content or len(content) < 20: continue
+                
+                json_matches = re.findall(r'(\{.*?\})', content, re.DOTALL)
+                for j_str in json_matches:
+                    try:
+                        clean_j = re.sub(r'//.*?\n', '', j_str)
+                        data = json.loads(clean_j)
+                        if isinstance(data, dict):
+                            keywords.extend(self._extract_from_dict(data))
+                    except:
+                        for key in self.SEARCH_KEYS:
+                            if key in j_str:
+                                pattern = r'["\']?' + re.escape(key) + r'["\']?\s*[:=]\s*["\']?([^"\'\s,\]}]+)["\']?'
+                                m = re.search(pattern, j_str, re.I)
+                                if m: keywords.extend(self._split_keywords(m.group(1), vetted=True))
             
         # 6. Поиск в произвольных атрибутах 'keywords' любого тега
         for tag in soup.find_all(True, attrs={"keywords": True}):
