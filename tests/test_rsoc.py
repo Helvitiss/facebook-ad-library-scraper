@@ -174,3 +174,47 @@ def test_process_link_skips_html_parsing_for_tracker_domains(extractor):
 
     kws = asyncio.run(extractor.process_link("https://track.topfindtoday.com/cf/r/69a6b6bd107b4900122c8a21", http_client=Client()))
     assert kws == []
+
+def test_noise_keywords_filtered_in_process_link(monkeypatch, extractor):
+    monkeypatch.setattr(extractor, "extract_from_url", lambda url: ["scholarships to study in seoul", "-1000px", "178.133.189.26"])
+    monkeypatch.setattr(extractor, "extract_from_html", lambda html, current_url=None: ["window.top._googCsa.q", "function(t", "search_term_string", "Study abroad scholarships Seoul"])
+
+    class Resp:
+        def __init__(self):
+            self.url = "https://landing.example/?search=scholarships+to+study+in+seoul"
+            self.history = []
+            self.text = "<html></html>"
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            return Resp()
+
+    kws = asyncio.run(extractor.process_link("https://landing.example/start", http_client=Client()))
+    assert "scholarships to study in seoul" in kws
+    assert "Study abroad scholarships Seoul" in kws
+    assert "-1000px" not in kws
+    assert "178.133.189.26" not in kws
+    assert "window.top._googCsa.q" not in kws
+    assert "function(t" not in kws
+    assert "search_term_string" not in kws
+
+def test_process_link_skips_html_for_noisy_domains(extractor):
+    class Resp:
+        def __init__(self):
+            self.url = "https://gethappyday.com/asrsearch?search=test"
+            self.history = []
+            self.text = '<script>window.top._googCsa.q="noise"</script>'
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            return Resp()
+
+    kws = asyncio.run(extractor.process_link("https://gethappyday.com/asrsearch?search=low+rent+studio+apartments", http_client=Client()))
+    assert "low rent studio apartments" in kws
+    assert "window.top._googCsa.q" not in kws

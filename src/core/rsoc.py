@@ -36,6 +36,12 @@ class RSOCExtractor:
         "topfindtoday.com",
     }
 
+    # Домены, где HTML чаще содержит автогенерируемый JS-шум вместо полезных RSOC.
+    NOISY_HTML_DOMAINS = {
+        "gethappyday.com",
+        "searchrelayr.com",
+    }
+
     # Структурные / контекстные ключи только для рекурсии
     CONTEXT_KEYS = {
         "feed", "feedData", "feed_data", "feedItems", "feed_items", "items", "list", 
@@ -124,6 +130,43 @@ class RSOCExtractor:
             return any(host == d or host.endswith(f".{d}") for d in self.TRACKER_DOMAINS)
         except Exception:
             return False
+
+    def _skip_html_for_domain(self, url: str) -> bool:
+        try:
+            host = urlparse(url).netloc.lower()
+            return (
+                any(host == d or host.endswith(f".{d}") for d in self.TRACKER_DOMAINS)
+                or any(host == d or host.endswith(f".{d}") for d in self.NOISY_HTML_DOMAINS)
+            )
+        except Exception:
+            return False
+
+    def _is_noise_keyword(self, keyword: str) -> bool:
+        if not keyword or not isinstance(keyword, str):
+            return True
+
+        s = keyword.strip()
+        if not s:
+            return True
+        s_lower = s.lower()
+
+        # Технические JS-токены
+        if s_lower in {"search_term_string", "begin", "look"}:
+            return True
+        if s_lower.startswith("function("):
+            return True
+        if "_googcsa" in s_lower or s_lower.startswith("window."):
+            return True
+
+        # CSS/размеры/пиксели
+        if re.fullmatch(r"-?\d+px", s_lower):
+            return True
+
+        # IP-адреса
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", s_lower):
+            return True
+
+        return False
 
 
 
@@ -266,7 +309,7 @@ class RSOCExtractor:
                 all_keywords.extend(self.extract_from_url(url))
                 all_keywords.extend(self.extract_from_url(final_url))
 
-            if html_content and not self._is_tracker_domain(final_url):
+            if html_content and not self._skip_html_for_domain(final_url):
                 all_keywords.extend(self.extract_from_html(html_content, current_url=final_url))
                 
         except Exception as e:
@@ -276,6 +319,7 @@ class RSOCExtractor:
         seen = set()
         for kw in all_keywords:
             if not kw: continue
+            if self._is_noise_keyword(kw): continue
             # Игнорируем голые плейсхолдеры
             if kw in ("{country}", "{city}", "{}"): continue
             
