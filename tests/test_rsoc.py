@@ -282,3 +282,38 @@ def test_extract_from_html_head_meta_keywords(extractor):
     assert "ayudante de montaje" in kws
     assert "desmontaje" in kws
     assert "ficha técnica" in kws
+
+def test_process_link_filters_ui_and_technical_noise(monkeypatch, extractor):
+    monkeypatch.setattr(extractor, "extract_from_url", lambda url: ["digital marketing course", "main", "DT540620"])
+    monkeypatch.setattr(
+        extractor,
+        "extract_from_html",
+        lambda html, current_url=None: [
+            "Terms of Service",
+            "document.createElement(",
+            "shopify-pixel",
+            "Part-time DM Program",
+        ],
+    )
+
+    class Resp:
+        def __init__(self):
+            self.url = "https://example.com/?q=digital+marketing+course"
+            self.history = []
+            self.text = "<html></html>"
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            return Resp()
+
+    kws = asyncio.run(extractor.process_link("https://example.com/start", http_client=Client()))
+    assert "digital marketing course" in kws
+    assert "Part-time DM Program" in kws
+    assert "main" not in kws
+    assert "DT540620" not in kws
+    assert "Terms of Service" not in kws
+    assert "document.createElement(" not in kws
+    assert "shopify-pixel" not in kws

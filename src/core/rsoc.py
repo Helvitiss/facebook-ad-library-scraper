@@ -153,17 +153,44 @@ class RSOCExtractor:
             return True
         s_lower = s.lower()
 
-        # Технические JS-токены
-        if s_lower in {"search_term_string", "begin", "look", "learn_more", "learn more"}:
-            return True
-        if s_lower.startswith("function("):
-            return True
-        if "_googcsa" in s_lower or s_lower.startswith("window."):
+        # Частые служебные/интерфейсные фразы, не являющиеся search intent
+        ui_noise = {
+            "terms of service", "privacy policy", "skip to content", "cookie policy",
+            "accept all", "reject all", "continue shopping", "write a review",
+            "shopify-pixel", "trekkie-storefront-renderer", "payload", "main", "product"
+        }
+        if s_lower in ui_noise:
             return True
 
-        # CSS/размеры/пиксели
+        # Технические JS-токены и API/DOM-конструкции
+        js_markers = (
+            "function(", "document.", "window.", "navigator.", "queryselector(",
+            "createelement(", "scrollheight", "return ", "var ", "const ", "=>"
+        )
+        if any(marker in s_lower for marker in js_markers):
+            return True
+
+        if s_lower in {"search_term_string", "begin", "look", "learn_more", "learn more"}:
+            return True
+        if "_googcsa" in s_lower:
+            return True
+
+        # CSS-селекторы/цвета/размеры/версии
+        if s_lower.startswith('.') or re.fullmatch(r"#[0-9a-f]{3,8}", s_lower):
+            return True
         if re.fullmatch(r"-?\d+px", s_lower):
             return True
+        if re.fullmatch(r"\d+(?:\.\d+){1,3}", s_lower):
+            return True
+
+        # Идентификаторы/артикулы/хэши: буквенно-цифровой шум без пробелов
+        if ' ' not in s_lower:
+            if re.fullmatch(r"[a-z]{0,3}\d{4,}[a-z0-9-]*", s_lower):
+                return True
+            if re.fullmatch(r"[a-z0-9_-]{14,}", s_lower):
+                return True
+            if re.fullmatch(r"[a-z0-9]{10,}", s_lower) and re.search(r"\d", s_lower):
+                return True
 
         # IP-адреса
         if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", s_lower):
@@ -175,6 +202,10 @@ class RSOCExtractor:
             "lesen sie mehr", "obtén información", "get insights on"
         ]
         if any(m in s_lower for m in cta_markers):
+            return True
+
+        # Слишком короткие одиночные слова часто шумовые в HTML/JS
+        if len(s_lower.split()) == 1 and len(s_lower) < 5:
             return True
 
         return False
