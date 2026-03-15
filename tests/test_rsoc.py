@@ -6,21 +6,14 @@ def extractor():
     return RSOCExtractor()
 
 def test_sanitize_geo(extractor):
-    # Setup some fake cache if needed, or rely on actual pycountry/geonamescache if valid
-    # But strictly unit testing might want to mock. 
-    # For now let's assume 'London' and 'Germany' are known
-    
+    # Гео-санитизация отключена: текст должен возвращаться как есть.
     text = "Best job in London for you"
-    # Note: The implementation replaces city with {city}. 
-    # Provided 'London' is in self.cities (likely is)
     sanitized = extractor._sanitize_geo(text)
-    assert "{city}" in sanitized
-    assert "London" not in sanitized
+    assert sanitized == text
 
     text2 = "Welcome to Germany"
     sanitized2 = extractor._sanitize_geo(text2)
-    assert "{country}" in sanitized2
-    assert "Germany" not in sanitized2
+    assert sanitized2 == text2
 
 def test_is_valid_keyword(extractor):
     assert extractor._is_valid_keyword("validKeyword") is True
@@ -34,6 +27,28 @@ def test_extract_from_url(extractor):
     keywords = extractor.extract_from_url(url)
     assert "super product" in keywords
     assert "cheap" in keywords
+
+def test_extract_from_facebook_ads_library_q_domain(extractor):
+    url = (
+        "https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL"
+        "&is_targeted_country=false&media_type=all&q=%22gethappyday.com%22"
+        "&search_type=keyword_exact_phrase&sort_data[mode]=total_impressions"
+        "&sort_data[direction]=desc&source=page-transparency-widget"
+    )
+
+    keywords = extractor.extract_from_url(url)
+    assert "gethappyday.com" in keywords
+
+def test_extract_from_facebook_ads_library_page_id(extractor):
+    url = (
+        "https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL"
+        "&is_targeted_country=false&media_type=all&search_type=page"
+        "&sort_data[mode]=total_impressions&sort_data[direction]=desc"
+        "&source=page-transparency-widget&view_all_page_id=541919755660451"
+    )
+
+    keywords = extractor.extract_from_url(url)
+    assert "541919755660451" in keywords
 
 def test_extract_from_jwt(extractor):
     import base64

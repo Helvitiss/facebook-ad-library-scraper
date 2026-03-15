@@ -45,33 +45,11 @@ class RSOCExtractor:
         "redirect", "android", "iphone", "ipad", "linux", "google", "bing", "yahoo",
         "ad_blocked", "device_type", "platform_name", "track_id", "channel", 
         "lang", "language", "network", "target_url", "dest",
-        "lang", "language", "network", "target_url", "dest",
         "hs256", "jwt", "unknown", "none", "unrestrictedsharedarraybuffer", 
         "sharedarraybuffer", "arraybuffer", "dataview", "uint8array", "uint16array", 
         "uint32array", "int8array", "int16array", "int32array", "float32array", 
         "float64array", "biguint64array", "bigint64array", "cryptokey", "cryptokeypair",
         "organicItemsList", "ko_oil", "privacy", "copyright", "terms", "about", "contact",
-        "support", "policy", "legal", "cookies", "advertising", "career", "feedback",
-        "article", "author", "headline", "url", "datepublished", 
-        "datemodified", "inlanguage", "@type", "@context", "@id", "schema.org", "imageobject",
-        "webpage", "postaladdress", "organization", "place"
-    }
-
-    # Ключи JSON, которые обычно содержат заголовки или тех. описание, а не ключевые слова
-    KEY_BLACKLIST = {
-        "headline", "description", "title", "caption", "text", "body", "content", 
-        "author", "publisher", "image", "logo", "url", "link", "href", "date", 
-        "published", "modified", "type", "context", "id", "schema", "version",
-        "og", "twitter", "meta", "viewport", "charset", "color", "theme",
-        "article", "post", "comment", "user", "name", "id", "@type", "@context",
-        "inLanguage", "mainEntityOfPage", "potentialAction", "articleBody",
-        "description", "headline", "name", "url", "mainEntityOfPage"
-    }
-
-    # Слова, которые слишком общие для одиночного захвата (разрешены только в составе фраз)
-    GENERIC_WORDS = {
-        "dental", "implants", "medical", "health", "care", "service", "price", "cost",
-        "learn", "more", "about", "click", "here", "read", "view"
         "support", "policy", "legal", "cookies", "advertising", "career", "feedback",
         "article", "author", "headline", "url", "datepublished", 
         "datemodified", "inlanguage", "@type", "@context", "@id", "schema.org", "imageobject",
@@ -150,32 +128,12 @@ class RSOCExtractor:
                 if len(words) == 1: return False
                 # Если слово в списке - очень общее/техническое, и оно есть в фразе - продолжаем проверку
         
-        
-        # Фильтрация по черному списку слов
-        words = re.findall(r'\b\w+\b', s_lower)
-        
-        # Одиночные общие слова - бан
-        if len(words) == 1 and s_lower in self.GENERIC_WORDS:
-            return False
-
-        for black_word in self.BLACKLIST:
-            if black_word.startswith("@") or black_word == "schema.org":
-                if black_word in s_lower: return False
-            elif black_word in words: 
-                # Если фраза состоит ТОЛЬКО из слова в черном списке - бан
-                if len(words) == 1: return False
-                # Если слово в списке - очень общее/техническое, и оно есть в фразе - продолжаем проверку
-        
         if any(x in s_lower for x in ["://", "www.", ".com", ".net", ".org", ".php", ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".svg", ".json"]): return False
         if s.startswith('/') or s.startswith('./') or s.startswith('../'): return False
         
         if len(s) > 100: return False
-        if len(s) > 100: return False
         if s.isdigit() or re.match(r'^[a-f0-9]{20,}$', s_lower): return False
         if re.search(r'[pbs]_\d{3,}', s_lower): return False
-        
-        # Разрешаем {} для плейсхолдеров типа {City}
-        if re.search(r'0x[0-9a-f]+', s_lower): return False
         
         # Разрешаем {} для плейсхолдеров типа {City}
         if re.search(r'0x[0-9a-f]+', s_lower): return False
@@ -188,12 +146,8 @@ class RSOCExtractor:
         if s.count('{') > 1 or s.count('}') > 1: return False
         if ":" in s and " " not in s: return False
         
-        # Всегда требуем минимум 2 слова — одиночные слова не являются поисковыми фразами
-        if " " not in s:
-            return False
-
         if not vetted:
-            if len(s) < 10:
+            if len(s) < 4:
                 # logger.debug(f"RSOC: Filtered (not vetted, too short): {s}")
                 return False
         else:
@@ -219,14 +173,16 @@ class RSOCExtractor:
         except:
             return text
 
-    def _split_keywords(self, text: Any, vetted: bool = False) -> list[str]:
+    def _sanitize_geo(self, text: str) -> str:
+        """Гео-санитизация отключена: возвращаем исходный текст без замен."""
+        return text
+
     def _split_keywords(self, text: Any, vetted: bool = False) -> list[str]:
         if not text: return []
         if not isinstance(text, str):
             if isinstance(text, (list, tuple)):
                 results = []
                 for item in text:
-                    results.extend(self._split_keywords(item, vetted=vetted))
                     results.extend(self._split_keywords(item, vetted=vetted))
                 return results
             return []
@@ -251,8 +207,6 @@ class RSOCExtractor:
             used_urllib = False
             if http_client:
                 try:
-                    response = await http_client.get(url, headers=self.client_kwargs["headers"])
-                    response.raise_for_status()
                     response = await http_client.get(url, headers=self.client_kwargs["headers"])
                     response.raise_for_status()
                     for history_resp in response.history:
@@ -283,16 +237,8 @@ class RSOCExtractor:
                     "Accept-Language": self.client_kwargs["headers"]["Accept-Language"],
                 }
                 req = urllib.request.Request(url, headers=safe_headers)
-                # Для urllib используем только безопасные заголовки, без gzip (иначе нужно декодировать вручную)
-                safe_headers = {
-                    "User-Agent": self.client_kwargs["headers"]["User-Agent"],
-                    "Accept": self.client_kwargs["headers"]["Accept"],
-                    "Accept-Language": self.client_kwargs["headers"]["Accept-Language"],
-                }
-                req = urllib.request.Request(url, headers=safe_headers)
                 
                 def _fetch():
-                    with opener.open(req, timeout=25) as response:
                     with opener.open(req, timeout=25) as response:
                         return response.geturl(), response.read().decode('utf-8', errors='ignore')
 
@@ -325,21 +271,32 @@ class RSOCExtractor:
         keywords = []
         try:
             parsed = urlparse(url)
-            
-            # 1. Извлечение из параметров запроса
+            host = parsed.netloc.lower()
+            is_fb_ads_library = "facebook.com" in host and "/ads/library" in parsed.path.lower()
             
             # 1. Извлечение из параметров запроса
             params = parse_qs(parsed.query)
             for key, values in params.items():
                 is_vetted = self._is_search_key(key)
                 for val in values:
-                    keywords.extend(self._split_keywords(val, vetted=is_vetted))
-                is_vetted = self._is_search_key(key)
-                for val in values:
+                    # Facebook Ads Library часто передает поисковый запрос в q в кавычках
+                    # (например q="gethappyday.com"). Такие доменные запросы не проходят
+                    # общую фильтрацию _is_valid_keyword, но это и есть целевой ключ.
+                    if is_fb_ads_library and key.lower() == "q":
+                        normalized = self._unquote_fully(val).strip().strip('"\'')
+                        if normalized:
+                            keywords.append(normalized)
+
+                    # Для режима поиска по странице Facebook Ads Library ключом выступает
+                    # view_all_page_id. Его значение числовое, поэтому оно не проходит
+                    # общую фильтрацию и добавляется отдельно.
+                    if is_fb_ads_library and key.lower() == "view_all_page_id":
+                        page_id = self._unquote_fully(val).strip()
+                        if page_id:
+                            keywords.append(page_id)
                     keywords.extend(self._split_keywords(val, vetted=is_vetted))
                 for val in values:
                     keywords.extend(self.extract_from_jwt(val))
-            
             
         except: pass
         return keywords
@@ -396,16 +353,7 @@ class RSOCExtractor:
                     
                 is_vetted = self._is_search_key(k_lower)
                 
-                
-                # Пропускаем нецелевые поля типа headline, description
-                if k_lower in self.KEY_BLACKLIST:
-                    continue
-                    
-                is_vetted = self._is_search_key(k_lower)
-                
                 # 1. Если ключ известный — берем его содержимое (обычно это строки с разделителями)
-                if is_vetted:
-                    extracted.extend(self._split_keywords(v, vetted=True))
                 if is_vetted:
                     extracted.extend(self._split_keywords(v, vetted=True))
                     # Если ключ совпал, не переходим к агрессивному захвату для этого же значения
@@ -459,7 +407,6 @@ class RSOCExtractor:
         keywords.extend(self._split_keywords(re.findall(data_attr_pattern, html, re.I)))
         
         # 3. Поиск в JSON-подобных структурах по ключам во всем HTML (агрессивно)
-        # 3. Поиск в JSON-подобных структурах по ключам во всем HTML (агрессивно)
         for key in self.SEARCH_KEYS:
             patterns = [
                 rf'[\"\']{key}[\"\']\s*[:=]\s*[\"\']([^\"\']+)[\"\']', 
@@ -467,40 +414,12 @@ class RSOCExtractor:
                 rf'\b{key}\s*[:=]\s*[\"\']([^\"\']+)[\"\']',        
                 rf'\b{key}\s*[:=]\s*\[(.*?)\]',
                 rf'[\"\']{key}[\"\']\s*[:=]\s*(\d+)', # Для числовых ID, которые могут быть полезны
-                rf'\b{key}\s*[:=]\s*\[(.*?)\]',
-                rf'[\"\']{key}[\"\']\s*[:=]\s*(\d+)', # Для числовых ID, которые могут быть полезны
             ]
             for pattern in patterns:
                 for match in re.findall(pattern, html, re.I):
                     if isinstance(match, str):
                         keywords.extend(self._split_keywords(match, vetted=True))
-                    if isinstance(match, str):
-                        keywords.extend(self._split_keywords(match, vetted=True))
         
-        # 4. Поиск и парсинг всех скриптов как JSON
-        for script in soup.find_all('script'):
-            content = script.string
-            if not content or len(content) < 20: continue
-            
-            # Ищем что-то похожее на JSON внутри скрипта
-            json_matches = re.findall(r'(\{.*?\})', content, re.DOTALL)
-            for j_str in json_matches:
-                try:
-                    # Пытаемся почистить строку для json.loads (убираем JS комментарии и т.д. - упрощенно)
-                    clean_j = re.sub(r'//.*?\n', '', j_str)
-                    data = json.loads(clean_j)
-                    if isinstance(data, dict):
-                        keywords.extend(self._extract_from_dict(data))
-                except:
-                    # Если не JSON, пробуем искать ключи внутри строки этого блока
-                    for key in self.SEARCH_KEYS:
-                        if key in j_str:
-                            # Используем обычную строку для regex, чтобы не путаться с f-string скобками
-                            pattern = r'["\']?' + re.escape(key) + r'["\']?\s*[:=]\s*["\']?([^"\'\s,\]}]+)["\']?'
-                            m = re.search(pattern, j_str, re.I)
-                            if m: keywords.extend(self._split_keywords(m.group(1), vetted=True))
-        
-        # 5. Извлечение только из meta keywords
         # 4. Поиск и парсинг всех скриптов как JSON
         for script in soup.find_all('script'):
             content = script.string
@@ -528,13 +447,7 @@ class RSOCExtractor:
         meta_kw = soup.find('meta', attrs={'name': 'keywords'})
         if meta_kw and meta_kw.get('content'):
             keywords.extend(self._split_keywords(meta_kw['content'], vetted=True))
-            keywords.extend(self._split_keywords(meta_kw['content'], vetted=True))
             
-        # 6. Поиск в произвольных атрибутах 'keywords' любого тега
-        for tag in soup.find_all(True, attrs={"keywords": True}):
-            keywords.extend(self._split_keywords(tag['keywords'], vetted=True))
-            
-        # 7. Интеллектуальное извлечение ссылок (самое важное)
         # 6. Поиск в произвольных атрибутах 'keywords' любого тега
         for tag in soup.find_all(True, attrs={"keywords": True}):
             keywords.extend(self._split_keywords(tag['keywords'], vetted=True))
@@ -576,23 +489,14 @@ class RSOCExtractor:
                 # Из ссылок берем только если это длинные фразы (от 3-х слов или > 15 симв)
                 if len(text) > 15 or text.count(" ") >= 2:
                     keywords.extend(self._split_keywords(text))
-                # Из ссылок берем только если это длинные фразы (от 3-х слов или > 15 симв)
-                if len(text) > 15 or text.count(" ") >= 2:
-                    keywords.extend(self._split_keywords(text))
 
-        # Финальная фильтрация: убираем совпадения с заголовком/H1 и частичные дубли
         # Финальная фильтрация: убираем совпадения с заголовком/H1 и частичные дубли
         filtered = []
         for kw in keywords:
             kw_low = kw.lower()
             # Убираем, если это в точности заголовок
-            # Убираем, если это в точности заголовок
             if page_title and kw_low == page_title: continue
             if h1_text and kw_low == h1_text: continue
-            
-            # Убираем "Learn more about..." если оно пролезло через заголовки
-            if "learn more" in kw_low or "click here" in kw_low: continue
-            
             
             # Убираем "Learn more about..." если оно пролезло через заголовки
             if "learn more" in kw_low or "click here" in kw_low: continue
