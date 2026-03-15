@@ -91,3 +91,36 @@ def test_extract_raw_base64(extractor):
     text = f"Some data: {payload_b64}"
     kws = extractor.extract_from_jwt(text)
     assert "base64_hidden_query" in kws
+
+def test_extract_from_url_skips_tracking_keys(extractor):
+    url = (
+        "https://example.com/?search=scholarships+to+study+in+seoul"
+        "&cid=ch27052+ch52307&click_id=44071a5d-bd0b-4a56-a314-afef581dc7de"
+        "&ad_id=%7BtrackingField1%7D"
+    )
+
+    kws = extractor.extract_from_url(url)
+    assert "scholarships to study in seoul" in kws
+    assert "ch27052 ch52307" not in kws
+    assert "44071a5d-bd0b-4a56-a314-afef581dc7de" not in kws
+    assert "{trackingField1}" not in kws
+
+def test_extract_from_jwt_ignores_non_search_fields(extractor):
+    import base64
+    import json
+
+    payload = {
+        "city": "Helsinki",
+        "dest": "eGMzZDVtLnZmc2t6cWIuY29t",
+        "track_id": "1e7b2e80530eb207d69a45583c607e15g1c1f49d43e221b235474d5ab6d72747",
+        "terms": "Viajes Para Mayores 65 Años,Ofertas Grandes Viajes 2026",
+    }
+    payload_json = json.dumps(payload).encode()
+    payload_b64 = base64.urlsafe_b64encode(payload_json).decode().rstrip("=")
+    fake_jwt = f"header.{payload_b64}.signature"
+
+    kws = extractor.extract_from_jwt(fake_jwt)
+    assert "Viajes Para Mayores 65 Años" in kws
+    assert "Ofertas Grandes Viajes 2026" in kws
+    assert "Helsinki" not in kws
+    assert "eGMzZDVtLnZmc2t6cWIuY29t" not in kws

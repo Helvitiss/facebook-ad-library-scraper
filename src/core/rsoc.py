@@ -25,6 +25,12 @@ class RSOCExtractor:
         "tkn", "token", "session", "jwt", "payload", "AB_VERSION_TERMS", "terms_list"
     }
 
+    TRACKING_QUERY_KEYS = {
+        "click_id", "cid", "subid", "subid1", "subid2", "ad_id", "campaign_id", "adset_id",
+        "account_id", "fb_pixel_id", "fbclid", "fbcv", "channel", "stid", "sclid", "asid",
+        "source", "utm_source", "utm_medium", "pub", "de", "locale", "lang", "m", "layout"
+    }
+
     # Структурные / контекстные ключи только для рекурсии
     CONTEXT_KEYS = {
         "feed", "feedData", "feed_data", "feedItems", "feed_items", "items", "list", 
@@ -285,6 +291,9 @@ class RSOCExtractor:
                 if is_fb_ads_library and key_lower not in {"q", "view_all_page_id"}:
                     continue
 
+                if key_lower in self.TRACKING_QUERY_KEYS:
+                    continue
+
                 for val in values:
                     # Facebook Ads Library часто передает поисковый запрос в q в кавычках
                     # (например q="gethappyday.com"). Такие доменные запросы не проходят
@@ -347,11 +356,11 @@ class RSOCExtractor:
                 
                 if payload_json and isinstance(payload_json, dict):
                     logger.debug(f"Успешно декодирован токен/Base64. Ключи: {list(payload_json.keys())}")
-                    keywords.extend(self._extract_from_dict(payload_json))
+                    keywords.extend(self._extract_from_dict(payload_json, aggressive_strings=False))
             except: continue
         return keywords
 
-    def _extract_from_dict(self, data: Any) -> list[str]:
+    def _extract_from_dict(self, data: Any, aggressive_strings: bool = True) -> list[str]:
         extracted = []
         if isinstance(data, dict):
             for k, v in data.items():
@@ -371,10 +380,10 @@ class RSOCExtractor:
                 
                 # 2. Рекурсия для вложенных структур
                 if isinstance(v, (dict, list)):
-                    extracted.extend(self._extract_from_dict(v))
+                    extracted.extend(self._extract_from_dict(v, aggressive_strings=aggressive_strings))
                 
                 # 3. Агрессивный захват (vetted=False по умолчанию)
-                elif isinstance(v, str):
+                elif aggressive_strings and isinstance(v, str):
                     s_clean = v.strip()
                     if self._is_valid_keyword(s_clean, vetted=False):
                         if not re.match(r'^[a-f0-9_\-\.]{15,}$', s_clean.lower()):
@@ -382,7 +391,7 @@ class RSOCExtractor:
                         
         elif isinstance(data, list):
             for item in data:
-                extracted.extend(self._extract_from_dict(item))
+                extracted.extend(self._extract_from_dict(item, aggressive_strings=aggressive_strings))
                 
         return extracted
 
