@@ -1,4 +1,5 @@
 {
+  "debug_mode": false,
   "scraper": {
     "concurrent_requests": 40,
     "retries_per_creative": 5,
@@ -17,7 +18,7 @@
     "image_filename": "Creative.jpg",
     "results_base_dir": "Exporter_Results",
     "retry_delay_seconds": 5,
-    "min_reaches": 0,
+    "min_reaches": 5000,
     "min_reaches_eu": 0,
     "min_reaches_uk": 0
   },

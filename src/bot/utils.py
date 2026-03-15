@@ -34,6 +34,7 @@ class TelegramLogHandler:
             self.pending_text = log_record
             now = time.time()
             if now - self.last_update_time >= self.cooldown:
+                self.last_update_time = now  # Немедленное обновление, чтобы избежать лавины тасок во время сетевого запроса
                 asyncio.run_coroutine_threadsafe(self.update_message(log_record), self.loop)
             else:
                 # Если мы в кулдауне, планируем обновление на потом, если еще не запланировано
@@ -67,7 +68,6 @@ class TelegramLogHandler:
             if new_text == self.last_text: return
             
             self.last_text = new_text
-            self.last_update_time = time.time()
             self.pending_text = None
             await self.message.edit_text(new_text)
         except aiogram.exceptions.TelegramRetryAfter as e:
@@ -106,8 +106,8 @@ async def process_task(original_message: Message, status_message: Message, url: 
     3. Сбор статистики и упаковка результатов в ZIP.
     4. Отправка архива пользователю.
     """
-    # tg_handler = TelegramLogHandler(status_message)
-    # sink_id = logger.add(tg_handler.write, format="{level} | {message}", level="INFO", filter=lambda r: "aiogram" not in r["name"])
+    tg_handler = TelegramLogHandler(status_message)
+    sink_id = logger.add(tg_handler.write, format="{level} | {message}", level="INFO", filter=lambda r: "aiogram" not in r["name"])
     
     try:
         await status_message.edit_text("Сбор данных...")
@@ -194,7 +194,8 @@ async def process_task(original_message: Message, status_message: Message, url: 
         await original_message.reply_document(
             document=FSInputFile(zip_file), 
             caption=caption,
-            parse_mode="HTML"
+            parse_mode="HTML",
+            request_timeout=300
         )
         
         try:
@@ -208,7 +209,8 @@ async def process_task(original_message: Message, status_message: Message, url: 
         logger.exception(f"Task processing error for {url}")
         await original_message.answer(f"Ошибка обработки: {e}")
     finally:
-        logger.remove(sink_id)
+        if 'sink_id' in locals():
+            logger.remove(sink_id)
 
 async def process_kw_task(message: Message, url: str):
     """
@@ -247,7 +249,8 @@ async def process_kw_task(message: Message, url: str):
             
             await message.reply_document(
                 document=FSInputFile(file_path),
-                caption=f"✅ Найдено {len(keywords)} ключевых слов (отправлено файлом из-за объема)."
+                caption=f"✅ Найдено {len(keywords)} ключевых слов (отправлено файлом из-за объема).",
+                request_timeout=300
             )
             os.remove(file_path)
             await status.delete()
