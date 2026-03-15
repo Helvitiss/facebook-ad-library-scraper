@@ -237,6 +237,18 @@ def test_extract_from_url_rac_and_adtext(extractor):
     assert "police impound audio systems" in kws
     assert any("audio systems" in k.lower() for k in kws)
 
+def test_extract_from_url_holvix_ignores_emoji_cta_and_learn_more(extractor):
+    url = (
+        "https://www.holvix.com/dsr?q=praca+sprz%C4%85taj%C4%85ca+rano"
+        "&rac=%F0%9F%A7%BC%F0%9F%A7%B9%F0%9F%A7%BD+Dowiedz+si%C4%99+wi%C4%99cej+o+Praca+Sprz%C4%85taj%C4%85ca+Rano%2CLEARN_MORE"
+    )
+
+    kws = asyncio.run(extractor.process_link(url))
+    assert "praca sprzątająca rano" in kws
+    assert all("🧼" not in k and "🧹" not in k and "🧽" not in k for k in kws)
+    assert "LEARN_MORE" not in kws
+    assert not any("dowiedz się więcej" in k.lower() for k in kws)
+
 def test_process_link_skips_html_if_original_is_tracker(extractor):
     class Resp:
         def __init__(self):

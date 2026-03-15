@@ -3,6 +3,7 @@ import json
 import httpx
 import re
 import base64
+import unicodedata
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Any
 from urllib.parse import urlparse, parse_qs
@@ -153,7 +154,7 @@ class RSOCExtractor:
         s_lower = s.lower()
 
         # Технические JS-токены
-        if s_lower in {"search_term_string", "begin", "look"}:
+        if s_lower in {"search_term_string", "begin", "look", "learn_more", "learn more"}:
             return True
         if s_lower.startswith("function("):
             return True
@@ -166,6 +167,14 @@ class RSOCExtractor:
 
         # IP-адреса
         if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", s_lower):
+            return True
+
+        # CTA-шаблоны из adtext/rac, обычно не являются целевыми ключами
+        cta_markers = [
+            "learn more", "read more", "descubre más", "dowiedz się więcej",
+            "lesen sie mehr", "obtén información", "get insights on"
+        ]
+        if any(m in s_lower for m in cta_markers):
             return True
 
         return False
@@ -256,10 +265,20 @@ class RSOCExtractor:
         parts = re.split(self.SPLIT_PATTERN, text)
         cleaned = []
         for p in parts:
-            s = p.strip()
+            s = self._normalize_candidate(p)
             if self._is_valid_keyword(s, vetted=vetted):
                 cleaned.append(s)
         return cleaned
+
+    def _normalize_candidate(self, text: str) -> str:
+        if not isinstance(text, str):
+            return ""
+
+        s = text.strip()
+        # Удаляем emoji/символьный шум, оставляя буквы/цифры/пунктуацию
+        s = "".join(ch for ch in s if not unicodedata.category(ch).startswith("So"))
+        s = re.sub(r"\s+", " ", s).strip(" .,!?:;\t\n\r")
+        return s
 
     async def process_link(self, url: str, http_client: Optional[httpx.AsyncClient] = None) -> list[str]:
         # Всегда сначала извлекаем из исходного URL: даже если сеть/редирект недоступны,
