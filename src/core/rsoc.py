@@ -176,9 +176,11 @@ class RSOCExtractor:
         # Технические JS-токены и API/DOM-конструкции
         js_markers = (
             "function(", "document.", "window.", "navigator.", "queryselector(",
-            "createelement(", "scrollheight", "return ", "var ", "const ", "=>"
+            "createelement(", "scrollheight", "return ", "=>"
         )
         if any(marker in s_lower for marker in js_markers):
+            return True
+        if re.match(r"^\s*(?:var|const|let)\b", s_lower):
             return True
 
         if s_lower in {"search_term_string", "begin", "look", "learn_more", "learn more"}:
@@ -460,6 +462,16 @@ class RSOCExtractor:
         # 2) JS-объявления: const/let/var terms = "a,b,c"
         for match in re.finditer(r"\b(?:const|let|var)\s+terms\s*=\s*[\"']([^\"']{3,8000})[\"']", html, re.I):
             extracted.extend(self._split_keywords(match.group(1), vetted=True))
+
+        # 3) JS-конфиги вида window.AB_VERSION_TERMS = "a,b,c" или AB_VERSION_TERMS: "..."
+        # Поддерживаем любые имена переменных, оканчивающиеся на _TERMS.
+        terms_var_patterns = [
+            r"\b(?:window\.)?[A-Z0-9_]+_TERMS\s*[:=]\s*[\"']([^\"']{3,8000})[\"']",
+            r"[\"'][A-Z0-9_]+_TERMS[\"']\s*:\s*[\"']([^\"']{3,8000})[\"']",
+        ]
+        for pattern in terms_var_patterns:
+            for match in re.finditer(pattern, html):
+                extracted.extend(self._split_keywords(match.group(1), vetted=True))
 
         return extracted
 

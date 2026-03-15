@@ -466,3 +466,31 @@ def test_process_link_extracts_const_terms_string_as_explicit_source(extractor):
         "Senior Walking Upgrade",
         "Better Than Walkers",
     ]
+
+
+def test_process_link_extracts_upper_terms_config_as_explicit_source(extractor):
+    class Resp:
+        def __init__(self):
+            self.url = "https://stylingod.com/koes/guia-de-cruceros-de-ultimo-minuto-a29t/?q=Last%20Minute%20Cruise%20Deals"
+            self.history = []
+            self.text = (
+                '<script>'
+                'window.AB_VERSION_NAME = "0";'
+                'window.AB_VERSION_TERMS = "reservar crucero todo incluido ultimo minuto,financiamiento para cruceros baratos del caribe,conseguir ofertas 2x1 en cruceros MSC,buscar cruceros de última hora saliendo de [city],cotizar viaje en crucero económico para familias,comprar crucero en cuotas fijas sin interés";'
+                'window.KO_ARTICLE_LANG = "es";'
+                '</script>'
+            )
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            return Resp()
+
+    kws = asyncio.run(extractor.process_link("https://stylingod.com/start", http_client=Client()))
+    assert "reservar crucero todo incluido ultimo minuto" in kws
+    assert "financiamiento para cruceros baratos del caribe" in kws
+    assert "conseguir ofertas 2x1 en cruceros MSC" in kws
+    assert "buscar cruceros de última hora saliendo de [city]" not in kws
+    assert "Last Minute Cruise Deals" not in kws
