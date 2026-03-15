@@ -1,8 +1,10 @@
+import asyncio
 import json
 import time
 import httpx
 import pycountry
 import re
+import urllib.parse
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,6 +23,8 @@ from src.core.config import config_instance as config
 
 class Exporter:
     """Класс для загрузки медиафайлов, генерации отчетов и транскрибации объявлений."""
+    
+    _translate_lock = threading.Lock()
     
     def __init__(self):
         self.results_dir: Optional[Path] = None
@@ -79,17 +83,24 @@ class Exporter:
                     logger.warning(f"Дамп {jf} не содержит данных объявлений.")
                     continue
 
-                # Группировка по link_url
+                # Группировка по link_url с нормализацией (убираем query параметры)
                 from collections import defaultdict
                 url_groups = defaultdict(list)
                 for ad in ads_to_process:
                     target_url = ad.get("link_url") or ad.get("ad_url") or "No Link"
+                    try:
+                        parsed = urllib.parse.urlparse(target_url)
+                        if parsed.scheme and parsed.netloc:
+                            # Оставляем только базовый URL без query параметров и якорей
+                            target_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+                    except: pass
                     url_groups[target_url].append(ad)
 
                 logger.info(f"Найдено {count} объявлений, сгруппированных в {len(url_groups)} уникальных ссылок.")
                 
                 proxy = config.data.scraper.proxy_url or None
-                with httpx.Client(follow_redirects=True, timeout=30, proxy=proxy) as client:
+                limits = httpx.Limits(max_keepalive_connections=config.data.exporter.exporter_workers, max_connections=config.data.exporter.exporter_workers + 5)
+                with httpx.Client(follow_redirects=True, timeout=30, proxy=proxy, limits=limits) as client:
                     self.http_client = client
                     with ThreadPoolExecutor(max_workers=config.data.exporter.exporter_workers) as executor:
                         futures = [executor.submit(self._process_ad_group, url, group) for url, group in url_groups.items()]
@@ -105,8 +116,12 @@ class Exporter:
                         
                         logger.info(f"Экспорт завершен: обработано {processed_count} групп ссылок.")
 
-            logger.info("Начало транскрибации видео...")
-            self._process_transcriptions()
+            if not config.data.debug_mode:
+                logger.info("Начало транскрибации видео...")
+                # Запускаем в потоке, чтоб не блокировать event loop бота Telegram во время длительной транскрибации
+                await asyncio.to_thread(self._process_transcriptions)
+            else:
+                logger.info("Отладочный режим: транскрибация видео пропущена.")
             
         finally:
             logger.remove(log_sink)
@@ -143,7 +158,8 @@ class Exporter:
             return None
 
         # Имя папки по первому тексту (или URL) + суммарный охват
-        main_text = ads[0].get("ad_texts", ["No text"])[0]
+        ad_texts = ads[0].get("ad_texts", [])
+        main_text = ad_texts[0] if ad_texts else "No text"
         folder_name = self._get_folder_name(all_reaches, [main_text])
         path = self._create_creative_folder(folder_name)
         
@@ -262,7 +278,10 @@ class Exporter:
                 if lang != 'ru':
                     proxy = config.data.scraper.proxy_url
                     proxies = {'http': proxy, 'https': proxy} if proxy else None
-                    t = GoogleTranslator(source='auto', target='ru', proxies=proxies).translate(t)
+                    with Exporter._translate_lock:
+                        t = GoogleTranslator(source='auto', target='ru', proxies=proxies).translate(t)
+                        # Микро-пауза чтобы не злить Google Translate
+                        time.sleep(0.5)
                     logger.debug(f"Translated folder name task: '{texts[0][:20]}...' ({lang}) -> '{t[:20]}...'")
             except Exception as e:
                 logger.debug(f"Translation failed for folder name: {e}")
@@ -298,8 +317,21 @@ class Exporter:
 
     _whisper_model: Optional[WhisperModel] = None
 
+    def _has_audio(self, path: Path) -> bool:
+        """Проверяет наличие аудиодорожки в файле с помощью библиотеки av."""
+        try:
+            import av
+            container = av.open(str(path))
+            has_audio = len(container.streams.audio) > 0
+            container.close()
+            return has_audio
+        except Exception as e:
+            logger.debug(f"Ошибка проверки аудио в {path.name}: {e}")
+            # Если не удалось проверить, пробуем транскрибировать (на всякий случай)
+            return True
+
     def _process_transcriptions(self):
-        """Запускает транскрибацию всех найденных видеофайлов."""
+        """Запускает транскрибацию всех найденных видеофайлов (последовательно)."""
         if Exporter._whisper_model is None:
             try:
                 # Используем заранее загруженную модель из образа
@@ -329,20 +361,34 @@ class Exporter:
             return
         
         logger.info(f"Обработка {len(videos)} видео для транскрибации...")
-        with ThreadPoolExecutor(max_workers=config.data.exporter.exporter_workers) as executor:
-            for v in videos:
-                executor.submit(self._transcribe, v, model)
+        # Последовательная обработка для экономии CPU и во избежание ошибок с потоками в Docker
+        for v in videos:
+            self._transcribe(v, model)
 
     def _transcribe(self, path: Path, model: WhisperModel):
         """Выполняет транскрибацию одного видеофайла и перевод на английский."""
         try:
-            segments, _ = model.transcribe(str(path))
-            text = "\n".join(s.text.strip() for s in segments)
-            
-            if not text.strip():
+            # 1. Проверка наличия аудио
+            if not self._has_audio(path):
+                logger.debug(f"Видео {path.name} не содержит аудиодорожки, пропуск транскрибации.")
                 return
 
-            # Перевод текста транскрипции на английский
+            # 2. Транскрибация
+            segments, _ = model.transcribe(str(path))
+            
+            # Собираем сегменты в текст, обрабатывая возможные ошибки итерации
+            text_parts = []
+            try:
+                for segment in segments:
+                    text_parts.append(segment.text.strip())
+            except Exception as e:
+                logger.warning(f"Ошибка при чтении сегментов видео {path.name}: {e}")
+            
+            text = "\n".join(text_parts).strip()
+            if not text:
+                return
+
+            # 3. Перевод текста транскрипции на английский
             try:
                 proxy = config.data.scraper.proxy_url
                 proxies = {'http': proxy, 'https': proxy} if proxy else None
@@ -355,7 +401,8 @@ class Exporter:
             with open(out_file, "w", encoding="utf-8") as f:
                 f.write(f"Original:\n{text}\n\nTranslation (EN):\n{trans}")
         except Exception as e:
-            logger.error(f"Ошибка транскрибации {path.name}: {e}")
+            import traceback
+            logger.error(f"Ошибка транскрибации {path.name}: {e}\n{traceback.format_exc()}")
 
 async def main(input_path: str | Path):
     """Точка входа для запуска процесса экспорта."""

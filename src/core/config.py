@@ -47,6 +47,7 @@ class TelegramConfig(BaseModel):
 
 class AppConfig(BaseModel):
     """Главная схема конфигурации приложения."""
+    debug_mode: bool = False
     scraper: ScraperConfig
     exporter: ExporterConfig
     facebook_api: FacebookApiConfig

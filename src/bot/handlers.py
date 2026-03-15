@@ -41,10 +41,28 @@ async def cmd_start(message: Message):
         "3. В ответ вы получите ZIP-архив с результатами.\n\n"
         "<b>Доступные команды:</b>\n"
         "/settings - Настройки (потоки, фильтры, доступы)\n"
+        "/debug - Вкл/выкл быстрый отладочный режим\n"
         "/cleanup - Очистка временных файлов на сервере\n"
         "/start - Показать это сообщение"
     )
     await message.answer(help_text, parse_mode="HTML")
+
+@router.message(Command("debug"))
+async def cmd_debug(message: Message):
+    """Обработчик команды /debug. Переключает режим быстрой отладки."""
+    if not is_user(message.from_user.id): return
+    
+    current_state = config.data.debug_mode
+    config.data.debug_mode = not current_state
+    
+    # Сохраняем изменения в файл
+    if config.save(config.data):
+        new_state_str = "ВКЛЮЧЕН 🟢 (Лимит 50 объявлений, без транскрибации видео)" if config.data.debug_mode else "ВЫКЛЮЧЕН 🔴 (Полный масштабный парсинг)"
+        await message.answer(f"Отладочный режим <b>{new_state_str}</b>.", parse_mode="HTML")
+    else:
+        # Откат в случае ошибки сохранения
+        config.data.debug_mode = current_state
+        await message.answer("❌ Ошибка при сохранении конфигурации.")
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message):

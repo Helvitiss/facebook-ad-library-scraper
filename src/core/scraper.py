@@ -271,7 +271,9 @@ class Scraper:
                     
                     # Улучшенная прокрутка для гарантированного перехвата GQL
                     scroll_iterations = getattr(config.data.scraper, "scroll_iterations", 3)
-                    logger.debug(f"Запуск прокрутки: {scroll_iterations} итераций")
+                    if config.data.debug_mode:
+                        scroll_iterations = 1
+                    logger.debug(f"Запуск прокрутки: {scroll_iterations} итераций{' (Debug Mode)' if config.data.debug_mode else ''}")
                     
                     for s in range(scroll_iterations):
                         try:
@@ -491,7 +493,32 @@ class Scraper:
 
         # Теперь можно запускать RSOC, так как у нас появились ссылки
         extractor = RSOCExtractor(proxy=self.proxy)
-        await asyncio.gather(*[self._proc_rsoc(g, extractor, gql_client.client) for g in groups if g.link_url])
+        rsoc_tasks = []
+        rsoc_semaphore = asyncio.Semaphore(8) # Ограничиваем параллельные запросы к лендингам
+        
+        async def _bounded_rsoc(g, ext, cl):
+            async with rsoc_semaphore:
+                await self._proc_rsoc(g, ext, cl)
+
+        for g in groups:
+            # Если ссылки нет, пробуем еще раз поискать в креативах
+            if not g.link_url:
+                for c in g.creatives:
+                    if c.transparency_data:
+                        ad_details = c.transparency_data.get("ad_library_main", {}).get("ad_details", {})
+                        # Проверяем разные возможные поля для ссылки
+                        for link_field in ["link_url", "link_description", "caption"]:
+                            if link := ad_details.get(link_field):
+                                if isinstance(link, str) and link.startswith("http"):
+                                    g.link_url = link
+                                    break
+                    if g.link_url: break
+            
+            if g.link_url:
+                rsoc_tasks.append(_bounded_rsoc(g, extractor, gql_client.client))
+        
+        if rsoc_tasks:
+            await asyncio.gather(*rsoc_tasks)
 
         # Агрегация охватов выполняется ПОСЛЕ того, как все данные получены
         self._aggregate_reaches(groups)
@@ -626,6 +653,7 @@ class Scraper:
         try:
             if kw := await extractor.process_link(group.link_url, http_client):
                 group.rsoc_keywords = list(set(kw))
+                logger.debug(f"RSOC: Извлекли {len(kw)} ключей для {group.link_url}")
         except Exception as e:
             logger.debug(f"RSOC Error for {group.link_url}: {e}")
 
@@ -668,6 +696,7 @@ async def main(urls: List[str] = None):
                 conn_limit = config.data.scraper.concurrent_requests
                 # Оставляем запас для других запросов
                 limits = httpx.Limits(max_keepalive_connections=conn_limit, max_connections=conn_limit + 10)
+                
                 async with httpx.AsyncClient(proxy=scraper.proxy, timeout=30, limits=limits, follow_redirects=True) as client:
                     gql = GraphQLClient(
                         client, 
@@ -680,6 +709,10 @@ async def main(urls: List[str] = None):
                     if not raw:
                         logger.warning(f"Объявления не найдены для {url}. Пропуск.")
                         continue
+                        
+                    if config.data.debug_mode:
+                        raw = raw[:50]
+                        logger.info(f"Отладочный режим: ограничение количества парсящихся объявлений до {len(raw)}")
                         
                     groups = await scraper.process_creatives(gql, raw)
                     await scraper.enrich_groups(groups, gql)
