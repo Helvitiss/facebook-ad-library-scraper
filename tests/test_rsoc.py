@@ -432,3 +432,37 @@ def test_process_link_prefers_forcekey_source_without_mixing(extractor):
 
     kws = asyncio.run(extractor.process_link("https://adepty.co/start", http_client=Client()))
     assert kws == ["Exact Term A", "Exact Term B"]
+
+
+def test_process_link_extracts_const_terms_string_as_explicit_source(extractor):
+    class Resp:
+        def __init__(self):
+            self.url = "https://dealfinderdirect.com/afs-contents/?q=Seniors+Are+Replacing+Walkers+With+This+Device"
+            self.history = []
+            self.text = (
+                '<script>'
+                'const terms = "Upgrade Mobility,Try New Device,Ditch Your Walker,Safer Walking Aid,Easy Senior Mobility,Modern Mobility Solution,Walk Freely Again,Order Mobility Device,Senior Walking Upgrade,Better Than Walkers";'
+                'const charset = "UTF-8"; function track(){ return true; }'
+                '</script>'
+            )
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            return Resp()
+
+    kws = asyncio.run(extractor.process_link("https://dealfinderdirect.com/start", http_client=Client()))
+    assert kws == [
+        "Upgrade Mobility",
+        "Try New Device",
+        "Ditch Your Walker",
+        "Safer Walking Aid",
+        "Easy Senior Mobility",
+        "Modern Mobility Solution",
+        "Walk Freely Again",
+        "Order Mobility Device",
+        "Senior Walking Upgrade",
+        "Better Than Walkers",
+    ]

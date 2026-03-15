@@ -371,7 +371,7 @@ class RSOCExtractor:
 
         trusted: set[str] = set()
         # Ищем фрагменты вида "terms": ["...", "..."]
-        for match in re.finditer(r'[\"\']terms[\"\']\s*:\s*(\[[^\]]{1,8000}\])', html, re.I | re.S):
+        for match in re.finditer(r"[\"']terms[\"']\s*:\s*(\[[^\]]{1,8000}\])", html, re.I | re.S):
             arr_raw = match.group(1)
             try:
                 values = json.loads(arr_raw)
@@ -444,7 +444,9 @@ class RSOCExtractor:
             return []
 
         extracted: list[str] = []
-        for match in re.finditer(r'[\"\']terms[\"\']\s*:\s*(\[[^\]]{1,8000}\])', html, re.I | re.S):
+
+        # 1) JSON-массивы: "terms": ["a", "b", ...]
+        for match in re.finditer(r"[\"']terms[\"']\s*:\s*(\[[^\]]{1,8000}\])", html, re.I | re.S):
             arr_raw = match.group(1)
             try:
                 values = json.loads(arr_raw)
@@ -454,6 +456,11 @@ class RSOCExtractor:
                 continue
             for value in values:
                 extracted.extend(self._split_keywords(value, vetted=True))
+
+        # 2) JS-объявления: const/let/var terms = "a,b,c"
+        for match in re.finditer(r"\b(?:const|let|var)\s+terms\s*=\s*[\"']([^\"']{3,8000})[\"']", html, re.I):
+            extracted.extend(self._split_keywords(match.group(1), vetted=True))
+
         return extracted
 
     def _finalize_keywords(self, keywords: list[str]) -> list[str]:
