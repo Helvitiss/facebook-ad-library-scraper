@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import time
 import shutil
@@ -17,6 +18,62 @@ from src.core.exporter import main as exporter_main
 from src.core.rsoc import RSOCExtractor
 
 import aiogram.exceptions
+
+
+def _collect_rsoc_by_link(result_dir: Path) -> dict[str, list[str]]:
+    """Собирает RSOC-ключи из JSON-дампов в разрезе link_url."""
+    per_link: dict[str, list[str]] = {}
+
+    for jf in result_dir.glob("*.json"):
+        try:
+            with open(jf, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                continue
+
+            for row in data:
+                link = (row.get("link_url") or "N/A").strip()
+                bucket = per_link.setdefault(link, [])
+                for k in row.get("rsoc_keywords", []):
+                    val = (k or "").strip()
+                    if val:
+                        bucket.append(val)
+        except Exception as e:
+            logger.debug(f"Debug RSOC read error {jf}: {e}")
+
+    # Дедуп по каждой ссылке
+    normalized: dict[str, list[str]] = {}
+    for link, kws in per_link.items():
+        seen = set()
+        uniq = []
+        for k in kws:
+            low = k.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            uniq.append(k)
+        normalized[link] = uniq
+
+    return normalized
+
+
+def _format_rsoc_by_link(grouped: dict[str, list[str]]) -> str:
+    """Форматирует RSOC-ключи по ссылкам в текст для отправки файлом."""
+    lines = []
+    total = 0
+    for i, (link, kws) in enumerate(grouped.items(), 1):
+        lines.append(f"{i}. Link: {link}")
+        if kws:
+            for k in kws:
+                lines.append(f"  - {k}")
+            total += len(kws)
+        else:
+            lines.append("  -")
+        lines.append("")
+
+    lines.append(f"Total links: {len(grouped)}")
+    lines.append(f"Total keywords: {total}")
+    return "\n".join(lines)
 
 class TelegramLogHandler:
     """Перехватчик логов для отправки их в сообщение Telegram (status message)."""
@@ -116,6 +173,28 @@ async def process_task(original_message: Message, status_message: Message, url: 
         if not res_dir:
             logger.warning(f"Парсер вернул пустой результат для {url}")
             return await status_message.edit_text("Парсер не смог найти данные по этой ссылке. Возможно, поиск не дал результатов или доступ заблокирован.")
+
+        if config.data.debug_mode:
+            await status_message.edit_text("Отладка RSOC: формирую результат...")
+
+            grouped = _collect_rsoc_by_link(Path(res_dir))
+            grouped = {link: kws for link, kws in grouped.items() if kws}
+
+            if not grouped:
+                return await status_message.edit_text("Debug RSOC: ключи не найдены.")
+
+            report_text = _format_rsoc_by_link(grouped)
+            report_path = Path(res_dir) / f"debug_rsoc_{int(time.time())}.txt"
+            report_path.write_text(report_text, encoding="utf-8")
+
+            await status_message.edit_text(
+                f"Debug RSOC: найдено {sum(len(v) for v in grouped.values())} ключей в {len(grouped)} ссылках. Отправляю TXT-файл..."
+            )
+            await original_message.answer_document(
+                document=FSInputFile(report_path),
+                caption="Debug RSOC: ключи по каждой ссылке лендинга"
+            )
+            return
 
         await status_message.edit_text("Загрузка и транскрибация...")
         await exporter_main(res_dir)

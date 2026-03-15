@@ -4,7 +4,6 @@ import time
 import httpx
 import pycountry
 import re
-import urllib.parse
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -83,17 +82,13 @@ class Exporter:
                     logger.warning(f"Дамп {jf} не содержит данных объявлений.")
                     continue
 
-                # Группировка по link_url с нормализацией (убираем query параметры)
+                # Группировка по полной link_url (query-параметры сохраняем)
                 from collections import defaultdict
                 url_groups = defaultdict(list)
                 for ad in ads_to_process:
                     target_url = ad.get("link_url") or ad.get("ad_url") or "No Link"
-                    try:
-                        parsed = urllib.parse.urlparse(target_url)
-                        if parsed.scheme and parsed.netloc:
-                            # Оставляем только базовый URL без query параметров и якорей
-                            target_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
-                    except: pass
+                    if isinstance(target_url, str):
+                        target_url = target_url.strip()
                     url_groups[target_url].append(ad)
 
                 logger.info(f"Найдено {count} объявлений, сгруппированных в {len(url_groups)} уникальных ссылок.")
