@@ -343,3 +343,42 @@ def test_extract_from_url_does_not_treat_pub_as_search_key(extractor):
     assert "jeep avenger deals 2026" in kws
     assert "7639458541111112" not in kws
     assert "Facebook_feed" not in kws
+
+
+def test_process_link_rac_context_filters_unrelated_keywords(extractor):
+    class Resp:
+        def __init__(self):
+            self.url = (
+                "https://thetechnodrom.com/koit/guida-alle-offerte-jeep-avenger-2026-a29t/?"
+                "q=Jeep+Avenger+Deals+2026&rac=Guida+alle+offerte+Jeep+Avenger+2026"
+            )
+            self.history = []
+            self.text = "<html></html>"
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            return Resp()
+
+    original_extract_from_html = extractor.extract_from_html
+    extractor.extract_from_html = lambda html, current_url=None: [
+        "2025 volvo s60",
+        "top suvs v1 fr",
+        "best electric suv",
+        "finanziamento Jeep Avenger anticipo zero",
+        "valutazione usato e preventivo Jeep Avenger online",
+    ]
+
+    try:
+        kws = asyncio.run(extractor.process_link("https://thetechnodrom.com/start", http_client=Client()))
+    finally:
+        extractor.extract_from_html = original_extract_from_html
+
+    assert "Jeep Avenger Deals 2026" in kws
+    assert "finanziamento Jeep Avenger anticipo zero" in kws
+    assert "valutazione usato e preventivo Jeep Avenger online" in kws
+    assert "2025 volvo s60" not in kws
+    assert "top suvs v1 fr" not in kws
+    assert "best electric suv" not in kws

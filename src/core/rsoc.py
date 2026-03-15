@@ -322,6 +322,55 @@ class RSOCExtractor:
         s = re.sub(r"\s+", " ", s).strip(" .,!?:;\t\n\r")
         return s
 
+
+    def _extract_query_context_tokens(self, url: str) -> set[str]:
+        """Извлекает опорные токены из q/search-параметров для фильтрации шумовых ключей."""
+        try:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+        except Exception:
+            return set()
+
+        context_values = []
+        for key in ("q", "search", "search_term", "utm_term", "keyword"):
+            context_values.extend(params.get(key, []))
+
+        if not context_values:
+            return set()
+
+        tokens: set[str] = set()
+        for raw in context_values:
+            normalized = self._normalize_candidate(self._unquote_fully(raw)).lower()
+            for token in re.findall(r"[a-zA-ZÀ-ÿ0-9]+", normalized):
+                if len(token) < 3:
+                    continue
+                if token in self.GENERIC_WORDS or token in self.BLACKLIST:
+                    continue
+                tokens.add(token)
+        return tokens
+
+    def _should_apply_context_filter(self, url: str) -> bool:
+        """Контекстная фильтрация включается для adtext/rac-ссылок, где чаще всего есть шум."""
+        try:
+            params = parse_qs(urlparse(url).query)
+            return "rac" in params or "adtext" in params
+        except Exception:
+            return False
+
+    def _is_context_relevant_keyword(self, keyword: str, context_tokens: set[str]) -> bool:
+        if not context_tokens:
+            return True
+
+        kw_tokens = {
+            t for t in re.findall(r"[a-zA-ZÀ-ÿ0-9]+", keyword.lower())
+            if len(t) >= 3
+        }
+        if not kw_tokens:
+            return True
+
+        overlap = kw_tokens & context_tokens
+        return len(overlap) >= 2
+
     async def process_link(self, url: str, http_client: Optional[httpx.AsyncClient] = None) -> list[str]:
         # Всегда сначала извлекаем из исходного URL: даже если сеть/редирект недоступны,
         # это сохраняет ключи из query (например q=...).
@@ -379,14 +428,22 @@ class RSOCExtractor:
         except Exception as e:
             logger.warning(f"RSOC: Ошибка доступа/обработки ссылки {url} ({type(e).__name__}): {e}")
         
+        context_tokens = self._extract_query_context_tokens(final_url or url)
+        apply_context_filter = self._should_apply_context_filter(final_url or url) and bool(context_tokens)
+
         unique_results = []
         seen = set()
         for kw in all_keywords:
-            if not kw: continue
-            if self._is_noise_keyword(kw): continue
+            if not kw:
+                continue
+            if self._is_noise_keyword(kw):
+                continue
             # Игнорируем голые плейсхолдеры
-            if kw in ("{country}", "{city}", "{}"): continue
-            
+            if kw in ("{country}", "{city}", "{}"):
+                continue
+            if apply_context_filter and not self._is_context_relevant_keyword(kw, context_tokens):
+                continue
+
             low = kw.lower()
             if low not in seen:
                 seen.add(low)
