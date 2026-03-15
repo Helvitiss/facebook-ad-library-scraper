@@ -218,3 +218,32 @@ def test_process_link_skips_html_for_noisy_domains(extractor):
     kws = asyncio.run(extractor.process_link("https://gethappyday.com/asrsearch?search=low+rent+studio+apartments", http_client=Client()))
     assert "low rent studio apartments" in kws
     assert "window.top._googCsa.q" not in kws
+
+def test_extract_from_url_rac_and_adtext(extractor):
+    url = (
+        "https://gethappyday.com/asrsearch?search=police+impound+audio+systems"
+        "&adtext=Police+Impound+Audio+Systems-+learn+more"
+        "&rac=Many+people+don%E2%80%99t+know:+You+could+buy+Audio+Systems+from+police+impound+auctions!+Learn+more"
+    )
+
+    kws = extractor.extract_from_url(url)
+    assert "police impound audio systems" in kws
+    assert any("audio systems" in k.lower() for k in kws)
+
+def test_process_link_skips_html_if_original_is_tracker(extractor):
+    class Resp:
+        def __init__(self):
+            self.url = "https://landing.example/?search=useful+keyword"
+            self.history = []
+            self.text = '<script>var x={"search":"bad noisy keyword","keyword":"another noise"};window.top._googCsa.q=1;</script>'
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            return Resp()
+
+    kws = asyncio.run(extractor.process_link("https://track.topfindtoday.com/cf/r/69a6b6bd107b4900122c8a21", http_client=Client()))
+    assert "useful keyword" in kws
+    assert "bad noisy keyword" not in kws

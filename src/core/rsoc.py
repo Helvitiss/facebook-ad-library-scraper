@@ -22,7 +22,8 @@ class RSOCExtractor:
         "recommendedTerms", "recommended_terms", "recommendedQueries", 
         "recommended_queries", "seedKeywords", "seed_keywords", "seedTerms", "seed_terms",
         "p", "tid", "click_id", "cid", "subid", "subid1", "subid2", "ad_id", "campaign_id",
-        "tkn", "token", "session", "jwt", "payload", "AB_VERSION_TERMS", "terms_list"
+        "tkn", "token", "session", "jwt", "payload", "AB_VERSION_TERMS", "terms_list",
+        "rac", "adtext"
     }
 
     TRACKING_QUERY_KEYS = {
@@ -265,6 +266,7 @@ class RSOCExtractor:
         all_keywords = self.extract_from_url(url)
         html_content = None
         final_url = url
+        started_from_tracker = self._is_tracker_domain(url)
         
         try:
             used_urllib = False
@@ -309,7 +311,7 @@ class RSOCExtractor:
                 all_keywords.extend(self.extract_from_url(url))
                 all_keywords.extend(self.extract_from_url(final_url))
 
-            if html_content and not self._skip_html_for_domain(final_url):
+            if html_content and not started_from_tracker and not self._skip_html_for_domain(final_url):
                 all_keywords.extend(self.extract_from_html(html_content, current_url=final_url))
                 
         except Exception as e:
