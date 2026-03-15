@@ -19,6 +19,43 @@ from src.core.rsoc import RSOCExtractor
 
 import aiogram.exceptions
 
+
+def _collect_rsoc_by_link(result_dir: Path) -> dict[str, list[str]]:
+    """Собирает RSOC-ключи из JSON-дампов в разрезе link_url."""
+    per_link: dict[str, list[str]] = {}
+
+    for jf in result_dir.glob("*.json"):
+        try:
+            with open(jf, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                continue
+
+            for row in data:
+                link = (row.get("link_url") or "N/A").strip()
+                bucket = per_link.setdefault(link, [])
+                for k in row.get("rsoc_keywords", []):
+                    val = (k or "").strip()
+                    if val:
+                        bucket.append(val)
+        except Exception as e:
+            logger.debug(f"Debug RSOC read error {jf}: {e}")
+
+    # Дедуп по каждой ссылке
+    normalized: dict[str, list[str]] = {}
+    for link, kws in per_link.items():
+        seen = set()
+        uniq = []
+        for k in kws:
+            low = k.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            uniq.append(k)
+        normalized[link] = uniq
+
+    return normalized
+
 class TelegramLogHandler:
     """Перехватчик логов для отправки их в сообщение Telegram (status message)."""
     def __init__(self, message: Message):
@@ -121,32 +158,23 @@ async def process_task(original_message: Message, status_message: Message, url: 
         if config.data.debug_mode:
             await status_message.edit_text("Отладка RSOC: формирую результат...")
 
-            rsoc = []
-            for jf in Path(res_dir).glob("*.json"):
-                try:
-                    with open(jf, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if isinstance(data, list):
-                        for row in data:
-                            rsoc.extend(row.get("rsoc_keywords", []))
-                except Exception as e:
-                    logger.debug(f"Debug RSOC read error {jf}: {e}")
+            grouped = _collect_rsoc_by_link(Path(res_dir))
+            grouped = {link: kws for link, kws in grouped.items() if kws}
 
-            unique = []
-            seen = set()
-            for k in rsoc:
-                low = (k or "").strip().lower()
-                if not low or low in seen:
-                    continue
-                seen.add(low)
-                unique.append(k.strip())
-
-            if not unique:
+            if not grouped:
                 return await status_message.edit_text("Debug RSOC: ключи не найдены.")
 
-            preview = "\n".join(f"- {k}" for k in unique[:50])
+            blocks = []
+            total = 0
+            for i, (link, kws) in enumerate(grouped.items(), 1):
+                total += len(kws)
+                preview = "\n".join(f"  - {k}" for k in kws[:10])
+                more = f"\n  ... и еще {len(kws) - 10}" if len(kws) > 10 else ""
+                blocks.append(f"{i}. <code>{link}</code>\n{preview}{more}")
+
             await status_message.edit_text(
-                f"Debug RSOC (до 50 объявлений): найдено <b>{len(unique)}</b> ключей.\n\n{preview}",
+                f"Debug RSOC (до 50 объявлений): найдено <b>{total}</b> ключей в <b>{len(grouped)}</b> ссылках.\n\n"
+                + "\n\n".join(blocks[:20]),
                 parse_mode="HTML"
             )
             return
