@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import time
 import shutil
@@ -116,6 +117,39 @@ async def process_task(original_message: Message, status_message: Message, url: 
         if not res_dir:
             logger.warning(f"Парсер вернул пустой результат для {url}")
             return await status_message.edit_text("Парсер не смог найти данные по этой ссылке. Возможно, поиск не дал результатов или доступ заблокирован.")
+
+        if config.data.debug_mode:
+            await status_message.edit_text("Отладка RSOC: формирую результат...")
+
+            rsoc = []
+            for jf in Path(res_dir).glob("*.json"):
+                try:
+                    with open(jf, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        for row in data:
+                            rsoc.extend(row.get("rsoc_keywords", []))
+                except Exception as e:
+                    logger.debug(f"Debug RSOC read error {jf}: {e}")
+
+            unique = []
+            seen = set()
+            for k in rsoc:
+                low = (k or "").strip().lower()
+                if not low or low in seen:
+                    continue
+                seen.add(low)
+                unique.append(k.strip())
+
+            if not unique:
+                return await status_message.edit_text("Debug RSOC: ключи не найдены.")
+
+            preview = "\n".join(f"- {k}" for k in unique[:50])
+            await status_message.edit_text(
+                f"Debug RSOC (до 50 объявлений): найдено <b>{len(unique)}</b> ключей.\n\n{preview}",
+                parse_mode="HTML"
+            )
+            return
 
         await status_message.edit_text("Загрузка и транскрибация...")
         await exporter_main(res_dir)

@@ -57,7 +57,7 @@ async def cmd_debug(message: Message):
     
     # Сохраняем изменения в файл
     if config.save(config.data):
-        new_state_str = "ВКЛЮЧЕН 🟢 (Лимит 50 объявлений, без транскрибации видео)" if config.data.debug_mode else "ВЫКЛЮЧЕН 🔴 (Полный масштабный парсинг)"
+        new_state_str = "ВКЛЮЧЕН 🟢 (Лимит 50 объявлений, только проверка RSOC-ключей)" if config.data.debug_mode else "ВЫКЛЮЧЕН 🔴 (Полный масштабный парсинг)"
         await message.answer(f"Отладочный режим <b>{new_state_str}</b>.", parse_mode="HTML")
     else:
         # Откат в случае ошибки сохранения
