@@ -156,3 +156,21 @@ def test_process_link_ignores_redirect_history_noise(extractor):
     kws = asyncio.run(extractor.process_link("https://tracker.example/start", http_client=Client()))
     assert "good keyword" in kws
     assert "bad noise" not in kws
+
+def test_process_link_skips_html_parsing_for_tracker_domains(extractor):
+    class Resp:
+        def __init__(self, url, text):
+            self.url = url
+            self.history = []
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            noisy_html = '<script>var x={"search":"bad noisy keyword","keyword":"another noise"};</script>'
+            return Resp("https://track.topfindtoday.com/cf/r/69a6b6bd107b4900122c8a21", noisy_html)
+
+    kws = asyncio.run(extractor.process_link("https://track.topfindtoday.com/cf/r/69a6b6bd107b4900122c8a21", http_client=Client()))
+    assert kws == []

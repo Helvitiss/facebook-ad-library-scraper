@@ -31,6 +31,11 @@ class RSOCExtractor:
         "source", "utm_source", "utm_medium", "pub", "de", "locale", "lang", "m", "layout"
     }
 
+    TRACKER_DOMAINS = {
+        "track.topfindtoday.com",
+        "topfindtoday.com",
+    }
+
     # Структурные / контекстные ключи только для рекурсии
     CONTEXT_KEYS = {
         "feed", "feedData", "feed_data", "feedItems", "feed_items", "items", "list", 
@@ -112,6 +117,13 @@ class RSOCExtractor:
                 if suffix.isdigit():
                     return True
         return False
+
+    def _is_tracker_domain(self, url: str) -> bool:
+        try:
+            host = urlparse(url).netloc.lower()
+            return any(host == d or host.endswith(f".{d}") for d in self.TRACKER_DOMAINS)
+        except Exception:
+            return False
 
 
 
@@ -254,7 +266,7 @@ class RSOCExtractor:
                 all_keywords.extend(self.extract_from_url(url))
                 all_keywords.extend(self.extract_from_url(final_url))
 
-            if html_content:
+            if html_content and not self._is_tracker_domain(final_url):
                 all_keywords.extend(self.extract_from_html(html_content, current_url=final_url))
                 
         except Exception as e:
