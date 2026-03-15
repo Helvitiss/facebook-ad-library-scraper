@@ -371,7 +371,7 @@ class RSOCExtractor:
 
         trusted: set[str] = set()
         # Ищем фрагменты вида "terms": ["...", "..."]
-        for match in re.finditer(r"[\"']terms[\"']\s*:\s*(\[[^\]]{1,8000}\])", html, re.I | re.S):
+        for match in re.finditer(r'[\"\']terms[\"\']\s*:\s*(\[[^\]]{1,8000}\])', html, re.I | re.S):
             arr_raw = match.group(1)
             try:
                 values = json.loads(arr_raw)
@@ -408,6 +408,70 @@ class RSOCExtractor:
 
         overlap = kw_tokens & context_tokens
         return len(overlap) >= 2
+
+    def _extract_explicit_terms_from_url(self, url: str) -> list[str]:
+        try:
+            params = parse_qs(urlparse(url).query)
+        except Exception:
+            return []
+
+        results: list[str] = []
+        for key in ("terms", "terms_list", "term_list", "query_terms"):
+            for raw in params.get(key, []):
+                results.extend(self._split_keywords(raw, vetted=True))
+        return results
+
+    def _extract_forcekey_terms_from_url(self, url: str) -> list[str]:
+        try:
+            params = parse_qs(urlparse(url).query)
+        except Exception:
+            return []
+
+        results: list[str] = []
+        for key, values in params.items():
+            key_lower = key.lower()
+            if not key_lower.startswith("forcekey"):
+                continue
+            suffix = key_lower[len("forcekey"):]
+            if not suffix or not suffix.isalpha():
+                continue
+            for raw in values:
+                results.extend(self._split_keywords(raw, vetted=True))
+        return results
+
+    def _extract_explicit_terms_from_html(self, html: Optional[str]) -> list[str]:
+        if not html:
+            return []
+
+        extracted: list[str] = []
+        for match in re.finditer(r'[\"\']terms[\"\']\s*:\s*(\[[^\]]{1,8000}\])', html, re.I | re.S):
+            arr_raw = match.group(1)
+            try:
+                values = json.loads(arr_raw)
+            except Exception:
+                continue
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                extracted.extend(self._split_keywords(value, vetted=True))
+        return extracted
+
+    def _finalize_keywords(self, keywords: list[str]) -> list[str]:
+        unique_results = []
+        seen = set()
+        for kw in keywords:
+            if not kw:
+                continue
+            if self._is_noise_keyword(kw):
+                continue
+            if kw in ("{country}", "{city}", "{}"):
+                continue
+
+            low = kw.lower()
+            if low not in seen:
+                seen.add(low)
+                unique_results.append(kw)
+        return unique_results
 
     async def process_link(self, url: str, http_client: Optional[httpx.AsyncClient] = None) -> list[str]:
         # Всегда сначала извлекаем из исходного URL: даже если сеть/редирект недоступны,
@@ -467,31 +531,39 @@ class RSOCExtractor:
             logger.warning(f"RSOC: Ошибка доступа/обработки ссылки {url} ({type(e).__name__}): {e}")
         
         effective_url = final_url or url
+
+        # Приоритет 1: явные terms-массивы (query/html). Если есть — считаем их окончательными.
+        explicit_terms = []
+        explicit_terms.extend(self._extract_explicit_terms_from_url(url))
+        explicit_terms.extend(self._extract_explicit_terms_from_url(effective_url))
+        explicit_terms.extend(self._extract_explicit_terms_from_html(html_content))
+        explicit_terms = self._finalize_keywords(explicit_terms)
+        if explicit_terms:
+            return explicit_terms
+
+        # Приоритет 2: forceKey* параметры. Если есть — не смешиваем с другими источниками.
+        forcekey_terms = []
+        forcekey_terms.extend(self._extract_forcekey_terms_from_url(url))
+        forcekey_terms.extend(self._extract_forcekey_terms_from_url(effective_url))
+        forcekey_terms = self._finalize_keywords(forcekey_terms)
+        if forcekey_terms:
+            return forcekey_terms
+
         context_tokens = self._extract_query_context_tokens(effective_url)
         apply_context_filter = self._should_apply_context_filter(effective_url) and bool(context_tokens)
         trusted_terms = self._extract_trusted_terms_from_url(effective_url)
         trusted_terms.update(self._extract_trusted_terms_from_url(url))
         trusted_terms.update(self._extract_trusted_terms_from_html(html_content))
 
-        unique_results = []
-        seen = set()
+        filtered = []
         for kw in all_keywords:
             if not kw:
                 continue
-            if self._is_noise_keyword(kw):
+            if apply_context_filter and kw.lower() not in trusted_terms and not self._is_context_relevant_keyword(kw, context_tokens):
                 continue
-            # Игнорируем голые плейсхолдеры
-            if kw in ("{country}", "{city}", "{}"):
-                continue
-            kw_low = kw.lower()
-            if apply_context_filter and kw_low not in trusted_terms and not self._is_context_relevant_keyword(kw, context_tokens):
-                continue
+            filtered.append(kw)
 
-            low = kw_low
-            if low not in seen:
-                seen.add(low)
-                unique_results.append(kw)
-        return unique_results
+        return self._finalize_keywords(filtered)
 
     def extract_from_url(self, url: str) -> list[str]:
         keywords = []

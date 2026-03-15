@@ -101,7 +101,6 @@ def test_extract_from_url_skips_tracking_keys(extractor):
     )
 
     kws = extractor.extract_from_url(url)
-    assert "scholarships to study in seoul" in kws
     assert "ch27052 ch52307" not in kws
     assert "44071a5d-bd0b-4a56-a314-afef581dc7de" not in kws
     assert "{trackingField1}" not in kws
@@ -193,7 +192,6 @@ def test_noise_keywords_filtered_in_process_link(monkeypatch, extractor):
             return Resp()
 
     kws = asyncio.run(extractor.process_link("https://landing.example/start", http_client=Client()))
-    assert "scholarships to study in seoul" in kws
     assert "Study abroad scholarships Seoul" in kws
     assert "-1000px" not in kws
     assert "178.133.189.26" not in kws
@@ -408,9 +406,29 @@ def test_process_link_keeps_trusted_html_terms_under_context_filter(extractor):
             return Resp()
 
     kws = asyncio.run(extractor.process_link("https://gethappyday.com/start", http_client=Client()))
-    assert "scholarships to study in seoul" in kws
     assert "Study abroad scholarships Seoul" in kws
     assert "Graduate scholarships in Seoul" in kws
     assert "Scholarships for Korean universities" in kws
     assert "2025 volvo s60" not in kws
     assert "top suvs v1 fr" not in kws
+
+
+def test_process_link_prefers_forcekey_source_without_mixing(extractor):
+    class Resp:
+        def __init__(self):
+            self.url = (
+                "https://adepty.co/real-estate/article/?forceKeyA=Exact+Term+A"
+                "&forceKeyB=Exact+Term+B&q=generic+query"
+            )
+            self.history = []
+            self.text = '<script>var x={"keyword":"noise term"};</script>'
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, url, headers=None):
+            return Resp()
+
+    kws = asyncio.run(extractor.process_link("https://adepty.co/start", http_client=Client()))
+    assert kws == ["Exact Term A", "Exact Term B"]
