@@ -38,6 +38,9 @@ def test_extract_from_facebook_ads_library_q_domain(extractor):
 
     keywords = extractor.extract_from_url(url)
     assert "gethappyday.com" in keywords
+    assert "active" not in keywords
+    assert "keyword_exact_phrase" not in keywords
+    assert "total_impressions" not in keywords
 
 def test_extract_from_facebook_ads_library_page_id(extractor):
     url = (
@@ -49,6 +52,9 @@ def test_extract_from_facebook_ads_library_page_id(extractor):
 
     keywords = extractor.extract_from_url(url)
     assert "541919755660451" in keywords
+    assert "page" not in keywords
+    assert "desc" not in keywords
+    assert "page-transparency-widget" not in keywords
 
 def test_extract_from_jwt(extractor):
     import base64

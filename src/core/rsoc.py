@@ -277,12 +277,19 @@ class RSOCExtractor:
             # 1. Извлечение из параметров запроса
             params = parse_qs(parsed.query)
             for key, values in params.items():
+                key_lower = key.lower()
                 is_vetted = self._is_search_key(key)
+
+                # Для Facebook Ads Library игнорируем служебные параметры сортировки/фильтрации.
+                # Оставляем только реальные сущности поиска: q и view_all_page_id.
+                if is_fb_ads_library and key_lower not in {"q", "view_all_page_id"}:
+                    continue
+
                 for val in values:
                     # Facebook Ads Library часто передает поисковый запрос в q в кавычках
                     # (например q="gethappyday.com"). Такие доменные запросы не проходят
                     # общую фильтрацию _is_valid_keyword, но это и есть целевой ключ.
-                    if is_fb_ads_library and key.lower() == "q":
+                    if is_fb_ads_library and key_lower == "q":
                         normalized = self._unquote_fully(val).strip().strip('"\'')
                         if normalized:
                             keywords.append(normalized)
@@ -290,11 +297,14 @@ class RSOCExtractor:
                     # Для режима поиска по странице Facebook Ads Library ключом выступает
                     # view_all_page_id. Его значение числовое, поэтому оно не проходит
                     # общую фильтрацию и добавляется отдельно.
-                    if is_fb_ads_library and key.lower() == "view_all_page_id":
+                    if is_fb_ads_library and key_lower == "view_all_page_id":
                         page_id = self._unquote_fully(val).strip()
                         if page_id:
                             keywords.append(page_id)
-                    keywords.extend(self._split_keywords(val, vetted=is_vetted))
+
+                    # Для обычных URL извлекаем только из целевых ключей.
+                    if is_vetted:
+                        keywords.extend(self._split_keywords(val, vetted=True))
                 for val in values:
                     keywords.extend(self.extract_from_jwt(val))
             
