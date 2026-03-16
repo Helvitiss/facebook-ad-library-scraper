@@ -4,8 +4,7 @@ import httpx
 import re
 import base64
 import unicodedata
-from pathlib import Path
-from typing import Optional, List, Dict, Any, Any
+from typing import Optional, List, Any
 from urllib.parse import urlparse, parse_qs
 
 from loguru import logger
@@ -33,6 +32,18 @@ class RSOCExtractor:
         "account_id", "fb_pixel_id", "fbclid", "fbcv", "channel", "stid", "sclid", "asid",
         "source", "utm_source", "utm_medium", "pub", "de", "locale", "lang", "m", "layout"
     }
+
+    # Ключи, в которых чаще всего лежат JWT/Base64 payload'ы
+    TOKEN_QUERY_KEYS = {
+        "tkn", "token", "jwt", "session", "payload", "auth", "bearer"
+    }
+
+    # Ключи, которые обычно содержат реальный список терминов внутри HTML/скриптов
+    HTML_TERM_KEYS = {
+        "terms", "query_terms", "keywords", "keyword", "search_terms", "search_term",
+        "kw_list", "keyword_list", "terms_list", "term_list"
+    }
+    HTML_TERM_KEYS_PATTERN = "|".join(sorted(HTML_TERM_KEYS, key=len, reverse=True))
 
     TRACKER_DOMAINS = {
         "track.topfindtoday.com",
@@ -90,10 +101,11 @@ class RSOCExtractor:
     # Слова, которые слишком общие для одиночного захвата (разрешены только в составе фраз)
     GENERIC_WORDS = {
         "dental", "implants", "medical", "health", "care", "service", "price", "cost",
-        "learn", "more", "about", "click", "here", "read", "view"
+        "learn", "more", "about", "click", "here", "read", "view",
+        "search", "costs", "pricing", "info", "guide"
     }
 
-    SPLIT_PATTERN = r'[,|;\n]|\s*\|\|\s*|\s*::\s*'
+    SPLIT_PATTERN = r'[,|;\n]|\s*\|\|\s*::\s*'
 
     def __init__(self, proxy: Optional[httpx.Proxy] = None):
         self.proxy = proxy
@@ -163,6 +175,36 @@ class RSOCExtractor:
         if not s:
             return True
         s_lower = s.lower()
+        words = s.split()
+        word_count = len(words)
+
+        if word_count > 12:
+            return True
+        if len(s) > 90:
+            return True
+
+        if any(ch in s for ch in ("\n", "\r", "\t")):
+            return True
+
+        if any(dash in s for dash in ("—", "–")):
+            return True
+
+        if re.search(r"[.!?…]", s):
+            if word_count > 3 or len(s) > 30:
+                return True
+
+        if re.search(r"[:;]", s):
+            if word_count > 3:
+                return True
+
+        if re.search(r"\b\w\b$", s):
+            return True
+
+        if word_count == 1 and re.search(r"[a-zA-Z]", s) and re.search(r"\d", s):
+            return True
+
+        if s_lower.startswith(("and ", "or ", "with ", "without ", "including ", "plus ", "as well as ", "along with ")):
+            return True
 
         # Частые служебные/интерфейсные фразы, не являющиеся search intent
         ui_noise = {
@@ -218,11 +260,89 @@ class RSOCExtractor:
             return True
 
         # Слишком короткие одиночные слова часто шумовые в HTML/JS
-        if len(s_lower.split()) == 1 and len(s_lower) < 5:
+        if word_count == 1 and len(s_lower) < 5:
             return True
 
         return False
 
+    def _looks_like_keyword_list(self, text: str) -> bool:
+        if not text or not isinstance(text, str):
+            return False
+        s = self._unquote_fully(text).strip()
+        if len(s) < 6:
+            return False
+        # Типичные разделители списков
+        if s.count(",") >= 2:
+            if re.search(r"[.!?…]", s):
+                return False
+            return True
+        if any(x in s for x in ("||", "|", ";")):
+            if re.search(r"[.!?…]", s):
+                return False
+            return True
+        return False
+
+    def _extract_terms_from_array_like(self, raw: str) -> list[str]:
+        if not raw or not isinstance(raw, str):
+            return []
+
+        extracted: list[str] = []
+        try:
+            values = json.loads(raw)
+            if isinstance(values, list):
+                for value in values:
+                    extracted.extend(self._split_keywords(value, vetted=True))
+                return extracted
+        except Exception:
+            pass
+
+        # Fallback: достаем строки из массива с одинарными/двойными кавычками
+        for value in re.findall(r"[\"']([^\"']{2,200})[\"']", raw):
+            extracted.extend(self._split_keywords(value, vetted=True))
+        return extracted
+
+    def _extract_terms_from_script(self, content: str) -> list[str]:
+        if not content or not isinstance(content, str):
+            return []
+        if len(content) < 20:
+            return []
+        if len(content) > 800_000:
+            return []
+
+        extracted: list[str] = []
+
+        # 1) JSON- и JS-объекты: "terms": ["a", "b"] / 'keywords': [...]
+        for match in re.finditer(
+            rf"[\"'](?P<key>{self.HTML_TERM_KEYS_PATTERN})[\"']\s*:\s*(\[[^\]]{{1,8000}}\])",
+            content,
+            re.I | re.S
+        ):
+            extracted.extend(self._extract_terms_from_array_like(match.group(2)))
+
+        # 2) Строковые значения внутри объектов: "keywords": "a,b,c"
+        for match in re.finditer(
+            rf"[\"'](?P<key>terms|query_terms|keywords|keyword|search_terms|search_term)[\"']\s*:\s*[\"']([^\"']{{3,8000}})[\"']",
+            content,
+            re.I
+        ):
+            extracted.extend(self._split_keywords(match.group(2), vetted=True))
+
+        # 3) JS-объявления: const/let/var terms = "a,b,c"
+        for match in re.finditer(
+            r"\b(?:const|let|var)\s+(terms|keywords|keyword|query_terms|search_terms|search_term)\s*=\s*[\"']([^\"']{3,8000})[\"']",
+            content,
+            re.I
+        ):
+            extracted.extend(self._split_keywords(match.group(2), vetted=True))
+
+        # 4) *_TERMS переменные (window.AB_VERSION_TERMS и т.п.)
+        for match in re.finditer(
+            r"\b(?:window\.)?[A-Z0-9_]+_TERMS\s*[:=]\s*[\"']([^\"']{3,8000})[\"']",
+            content
+        ):
+            extracted.extend(self._split_keywords(match.group(1), vetted=True))
+
+        return extracted
 
 
     def _is_valid_keyword(self, s: str, min_len: int = 4, vetted: bool = False) -> bool:
@@ -372,20 +492,16 @@ class RSOCExtractor:
             return set()
 
         trusted: set[str] = set()
-        # Ищем фрагменты вида "terms": ["...", "..."]
-        for match in re.finditer(r"[\"']terms[\"']\s*:\s*(\[[^\]]{1,8000}\])", html, re.I | re.S):
-            arr_raw = match.group(1)
-            try:
-                values = json.loads(arr_raw)
-            except Exception:
-                continue
-            if not isinstance(values, list):
-                continue
-
-            for value in values:
-                for kw in self._split_keywords(value, vetted=True):
-                    if kw:
-                        trusted.add(kw.lower())
+        # Ищем фрагменты вида "terms/query_terms/keywords": ["...", "..."]
+        for match in re.finditer(
+            rf"[\"'](terms|query_terms|keywords|keyword)[\"']\s*:\s*(\[[^\]]{{1,8000}}\])",
+            html,
+            re.I | re.S
+        ):
+            arr_raw = match.group(2)
+            for kw in self._extract_terms_from_array_like(arr_raw):
+                if kw:
+                    trusted.add(kw.lower())
 
         return trusted
 
@@ -447,31 +563,38 @@ class RSOCExtractor:
 
         extracted: list[str] = []
 
-        # 1) JSON-массивы: "terms": ["a", "b", ...]
-        for match in re.finditer(r"[\"']terms[\"']\s*:\s*(\[[^\]]{1,8000}\])", html, re.I | re.S):
-            arr_raw = match.group(1)
-            try:
-                values = json.loads(arr_raw)
-            except Exception:
-                continue
-            if not isinstance(values, list):
-                continue
-            for value in values:
-                extracted.extend(self._split_keywords(value, vetted=True))
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+        except Exception as e:
+            logger.debug(f"RSOC: Ошибка инициализации BeautifulSoup: {e}")
+            return []
 
-        # 2) JS-объявления: const/let/var terms = "a,b,c"
-        for match in re.finditer(r"\b(?:const|let|var)\s+terms\s*=\s*[\"']([^\"']{3,8000})[\"']", html, re.I):
-            extracted.extend(self._split_keywords(match.group(1), vetted=True))
+        # 1) Meta keywords / query_terms / terms
+        for meta in soup.find_all('meta'):
+            key_name = (
+                meta.get('name')
+                or meta.get('property')
+                or meta.get('itemprop')
+                or ''
+            ).strip().lower()
+            content = (meta.get('content') or '').strip()
+            if not content:
+                continue
 
-        # 3) JS-конфиги вида window.AB_VERSION_TERMS = "a,b,c" или AB_VERSION_TERMS: "..."
-        # Поддерживаем любые имена переменных, оканчивающиеся на _TERMS.
-        terms_var_patterns = [
-            r"\b(?:window\.)?[A-Z0-9_]+_TERMS\s*[:=]\s*[\"']([^\"']{3,8000})[\"']",
-            r"[\"'][A-Z0-9_]+_TERMS[\"']\s*:\s*[\"']([^\"']{3,8000})[\"']",
-        ]
-        for pattern in terms_var_patterns:
-            for match in re.finditer(pattern, html):
-                extracted.extend(self._split_keywords(match.group(1), vetted=True))
+            if "keyword" in key_name or "query_terms" in key_name or key_name == "terms":
+                extracted.extend(self._split_keywords(content, vetted=True))
+                continue
+
+            # meta description иногда содержит список ключей
+            if key_name in {"description", "og:description", "twitter:description"}:
+                if self._looks_like_keyword_list(content):
+                    extracted.extend(self._split_keywords(content, vetted=True))
+
+        # 2) Скрипты: terms/keywords/query_terms + *_TERMS
+        for script in soup.find_all('script'):
+            content = script.string or script.get_text()
+            extracted.extend(self._extract_terms_from_script(content))
 
         return extracted
 
@@ -596,6 +719,7 @@ class RSOCExtractor:
             for key, values in params.items():
                 key_lower = key.lower()
                 is_vetted = self._is_search_key(key)
+                is_token_key = key_lower in self.TOKEN_QUERY_KEYS or any(x in key_lower for x in ("token", "jwt", "tkn", "payload"))
 
                 # Для Facebook Ads Library игнорируем служебные параметры сортировки/фильтрации.
                 # Оставляем только реальные сущности поиска: q и view_all_page_id.
@@ -606,6 +730,15 @@ class RSOCExtractor:
                     continue
 
                 for val in values:
+                    # Токены (JWT/Base64) не разбиваем на "слова"
+                    if is_token_key:
+                        keywords.extend(self.extract_from_jwt(val))
+                        continue
+
+                    # adtext/rac почти всегда шум — используем только как контекст (не как ключи)
+                    if key_lower in {"rac", "adtext"}:
+                        continue
+
                     # Facebook Ads Library часто передает поисковый запрос в q в кавычках
                     # (например q="gethappyday.com"). Такие доменные запросы не проходят
                     # общую фильтрацию _is_valid_keyword, но это и есть целевой ключ.
@@ -625,8 +758,6 @@ class RSOCExtractor:
                     # Для обычных URL извлекаем только из целевых ключей.
                     if is_vetted:
                         keywords.extend(self._split_keywords(val, vetted=True))
-                for val in values:
-                    keywords.extend(self.extract_from_jwt(val))
             
         except: pass
         return keywords
@@ -708,7 +839,6 @@ class RSOCExtractor:
 
     def extract_from_html(self, html: str, current_url: Optional[str] = None) -> list[str]:
         keywords = []
-        head_keywords = []
         if not html: return []
         
         try:
@@ -718,140 +848,32 @@ class RSOCExtractor:
             logger.debug(f"RSOC: Ошибка инициализации BeautifulSoup: {e}")
             return []
 
-        # 0. Извлечение заголовков для фильтрации
-        page_title = soup.title.string.strip().lower() if soup.title and soup.title.string else ""
-        h1_tag = soup.find('h1')
-        h1_text = h1_tag.get_text(strip=True).lower() if h1_tag else ""
-        
-        # Определение базового домена для фильтрации "источников" (внешних ссылок)
-        base_domain = ""
-        if current_url:
-            try:
-                base_domain = urlparse(current_url).netloc
-            except: pass
-
-        # 5. Извлечение только из meta keywords
-        meta_kw = soup.find('meta', attrs={'name': 'keywords'})
-        if meta_kw and meta_kw.get('content'):
-            head_keywords.extend(self._split_keywords(meta_kw['content'], vetted=True))
-
-        # 5.1 Расширенное извлечение из head/meta по полям keywords/query/terms
-        # Нужнo для сайтов, где ключи лежат в <meta name="keywords" ...>
-        # или в property/itemprop вариациях.
-        head = soup.head
-        if head:
-            for meta in head.find_all('meta'):
-                key_name = (
-                    meta.get('name')
-                    or meta.get('property')
-                    or meta.get('itemprop')
-                    or ''
-                ).strip().lower()
-                content = (meta.get('content') or '').strip()
-                if not content:
-                    continue
-
-                if any(x in key_name for x in ('keyword', 'query_terms', 'query', 'terms')):
-                    head_keywords.extend(self._split_keywords(content, vetted=True))
-
-        # Если в head уже есть валидные ключи, используем их как приоритетный источник
-        # и не запускаем агрессивный парсинг всего HTML/скриптов (основной источник шума).
-        if head_keywords:
-            keywords.extend(head_keywords)
-        else:
-            # 1. Извлечение из JWT токенов (скрипты, конфиги)
-            keywords.extend(self.extract_from_jwt(html))
-            
-            # 2. Поиск в data-атрибутах
-            data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries)\s*=\s*[\"\']([^\"\']+)[\"\']'
-            keywords.extend(self._split_keywords(re.findall(data_attr_pattern, html, re.I)))
-            
-            # 3. Поиск в JSON-подобных структурах по ключам во всем HTML (агрессивно)
-            for key in self.SEARCH_KEYS:
-                patterns = [
-                    rf'[\"\']{key}[\"\']\s*[:=]\s*[\"\']([^\"\']+)[\"\']', 
-                    rf'[\"\']{key}[\"\']\s*[:=]\s*\[(.*?)\]',           
-                    rf'\b{key}\s*[:=]\s*[\"\']([^\"\']+)[\"\']',        
-                    rf'\b{key}\s*[:=]\s*\[(.*?)\]',
-                    rf'[\"\']{key}[\"\']\s*[:=]\s*(\d+)',
-                ]
-                for pattern in patterns:
-                    for match in re.findall(pattern, html, re.I):
-                        if isinstance(match, str):
-                            keywords.extend(self._split_keywords(match, vetted=True))
-            
-            # 4. Поиск и парсинг всех скриптов как JSON
-            for script in soup.find_all('script'):
-                content = script.string
-                if not content or len(content) < 20: continue
-                
-                json_matches = re.findall(r'(\{.*?\})', content, re.DOTALL)
-                for j_str in json_matches:
-                    try:
-                        clean_j = re.sub(r'//.*?\n', '', j_str)
-                        data = json.loads(clean_j)
-                        if isinstance(data, dict):
-                            keywords.extend(self._extract_from_dict(data))
-                    except:
-                        for key in self.SEARCH_KEYS:
-                            if key in j_str:
-                                pattern = r'["\']?' + re.escape(key) + r'["\']?\s*[:=]\s*["\']?([^"\'\s,\]}]+)["\']?'
-                                m = re.search(pattern, j_str, re.I)
-                                if m: keywords.extend(self._split_keywords(m.group(1), vetted=True))
-            
-        # 6. Поиск в произвольных атрибутах 'keywords' любого тега
-        for tag in soup.find_all(True, attrs={"keywords": True}):
-            keywords.extend(self._split_keywords(tag['keywords'], vetted=True))
-            
-        # 7. Интеллектуальное извлечение ссылок (самое важное)
-        for a in soup.find_all('a'):
-            href = a.get('href', '')
-            text = a.get_text(strip=True)
-            if not text or len(text) < 5: continue
-            
-            # Фильтр 1: Внешние ссылки (источники) - ИГНОРИРУЕМ
-            if base_domain:
-                try:
-                    parsed_href = urlparse(href)
-                    if parsed_href.netloc and parsed_href.netloc != base_domain:
-                        continue
-                except: pass
-            elif href.startswith('http'): # Если нет базового домена, но ссылка абсолютная -> вероятно внешняя
+        # 1) Meta keywords/terms/description (если это список)
+        for meta in soup.find_all('meta'):
+            key_name = (
+                meta.get('name')
+                or meta.get('property')
+                or meta.get('itemprop')
+                or ''
+            ).strip().lower()
+            content = (meta.get('content') or '').strip()
+            if not content:
                 continue
 
-            # Фильтр 2: Контекст (Sources, Resources и т.д.)
-            is_source_block = False
-            for parent in a.parents:
-                # Если в родителе есть заголовок со словами Source/Resource -> это не ключи
-                header = parent.find(['h1','h2','h3','h4','h5','h6'])
-                if header:
-                    h_text = header.get_text().lower()
-                    if any(x in h_text for x in ['source', 'resource', 'reference', 'additional', 'about', 'contact']):
-                        is_source_block = True
-                        break
-                # Если сам контейнер имеет подозрительный класс/id
-                container_id = (parent.get('id') or '').lower()
-                container_class = " ".join(parent.get('class') or []).lower()
-                if any(x in container_id or x in container_class for x in ['footer', 'nav', 'menu', 'sidebar', 'copyright']):
-                    is_source_block = True
-                    break
-            
-            if not is_source_block:
-                # Из ссылок берем только если это длинные фразы (от 3-х слов или > 15 симв)
-                if len(text) > 15 or text.count(" ") >= 2:
-                    keywords.extend(self._split_keywords(text))
+            if "keyword" in key_name or "query_terms" in key_name or key_name == "terms":
+                keywords.extend(self._split_keywords(content, vetted=True))
+                continue
+            if key_name in {"description", "og:description", "twitter:description"}:
+                if self._looks_like_keyword_list(content):
+                    keywords.extend(self._split_keywords(content, vetted=True))
 
-        # Финальная фильтрация: убираем совпадения с заголовком/H1 и частичные дубли
-        filtered = []
-        for kw in keywords:
-            kw_low = kw.lower()
-            # Убираем, если это в точности заголовок
-            if page_title and kw_low == page_title: continue
-            if h1_text and kw_low == h1_text: continue
-            
-            # Убираем "Learn more about..." если оно пролезло через заголовки
-            if "learn more" in kw_low or "click here" in kw_low: continue
-            
-            filtered.append(kw)
-            
-        return filtered
+        # 2) Скрипты: terms/keywords/query_terms + *_TERMS
+        for script in soup.find_all('script'):
+            content = script.string or script.get_text()
+            keywords.extend(self._extract_terms_from_script(content))
+
+        # 3) data-атрибуты с явными ключевыми словами
+        data_attr_pattern = r'data-(?:keywords?|terms?|queries|search-terms?|search-queries)\s*=\s*[\"\']([^\"\']+)[\"\']'
+        keywords.extend(self._split_keywords(re.findall(data_attr_pattern, html, re.I)))
+
+        return keywords
