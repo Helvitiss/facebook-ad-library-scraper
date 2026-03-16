@@ -1,5 +1,5 @@
 {
-  "debug_mode": false,
+  "debug_mode": true,
   "scraper": {
     "concurrent_requests": 40,
     "retries_per_creative": 5,

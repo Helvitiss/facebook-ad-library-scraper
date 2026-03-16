@@ -1,4 +1,5 @@
 import asyncio
+import re
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
@@ -17,12 +18,12 @@ router.include_router(settings_router)
 queue = asyncio.Queue()
 
 async def worker():
-    """Фоновый воркер, обрабатывающий очередь задач (URL)."""
+    """Фоновый воркер, обрабатывающий очередь задач (URL или список URL)."""
     logger.info("Task queue worker started")
     while True:
-        message, status_message, url = await queue.get()
+        message, status_message, urls = await queue.get()
         try:
-            await process_task(message, status_message, url)
+            await process_task(message, status_message, urls)
         except Exception as e:
             logger.exception(f"Worker process error: {e}")
         finally:
@@ -88,17 +89,49 @@ async def cmd_cleanup(message: Message):
                 except: pass
     await message.answer(f"Очищено: {count}")
 
+def _extract_ad_library_urls(text: str) -> list[str]:
+    """Извлекает и нормализует ссылки на Facebook Ad Library из текста."""
+    raw = text or ""
+    tokens = re.split(r"\s+", raw)
+    candidates: list[str] = []
+
+    # 1) Ссылки с протоколом
+    candidates.extend(re.findall(r"https?://\\S+", raw))
+    # 2) Ссылки без протокола (facebook.com/ads/library/...)
+    candidates.extend([t for t in tokens if "facebook.com/ads/library" in t.lower()])
+
+    seen = set()
+    result = []
+    for url in candidates:
+        cleaned = url.strip().strip("<>[](){}").rstrip(".,;)\"'")
+        if "facebook.com/ads/library" not in cleaned.lower():
+            continue
+        if not cleaned.lower().startswith("http"):
+            cleaned = "https://" + cleaned
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
 @router.message(F.text.contains("facebook.com/ads/library"))
 async def handle_url(message: Message):
     """Перехватчик ссылок на Facebook Ad Library. Добавляет задачу в очередь."""
     if not is_user(message.from_user.id): return
-    url = message.text.strip()
+    urls = _extract_ad_library_urls(message.text or "")
+    if not urls:
+        return await message.answer("Не удалось найти корректные ссылки на Facebook Ad Library.")
     
     q_size = queue.qsize()
-    initial_text = f"Добавлено в очередь. Перед вами задач: {q_size}" if q_size > 0 else "Добавлено в очередь. Скоро начнем..."
+    count = len(urls)
+    initial_text = (
+        f"Добавлено {count} ссылок в очередь. Перед вами задач: {q_size}" if q_size > 0
+        else f"Добавлено {count} ссылок в очередь. Скоро начнем..."
+    )
     status = await message.answer(initial_text)
     
-    await queue.put((message, status, url))
+    await queue.put((message, status, urls))
 
 @router.message(Command("kw"))
 async def cmd_kw(message: Message, state: FSMContext):
@@ -141,4 +174,6 @@ async def process_kw_url_step(message: Message, state: FSMContext):
 
 async def start_worker():
     """Запускает асинхронный воркер обработки очереди."""
-    asyncio.create_task(worker())
+    workers = max(1, int(getattr(config.data.scraper, "url_workers", 1) or 1))
+    for _ in range(workers):
+        asyncio.create_task(worker())

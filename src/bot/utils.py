@@ -155,7 +155,7 @@ async def get_final_domain(url: str) -> str:
         except:
             return url
 
-async def process_task(original_message: Message, status_message: Message, url: str):
+async def process_task(original_message: Message, status_message: Message, url_or_urls):
     """
     Основной воркер процесса:
     1. Запуск парсинга (scraper).
@@ -167,8 +167,14 @@ async def process_task(original_message: Message, status_message: Message, url: 
     sink_id = logger.add(tg_handler.write, format="{level} | {message}", level="INFO", filter=lambda r: "aiogram" not in r["name"])
     
     try:
-        await status_message.edit_text("Сбор данных...")
-        res_dir = await scraper_main([url])
+        urls = list(url_or_urls) if isinstance(url_or_urls, (list, tuple)) else [url_or_urls]
+        urls = [u for u in urls if u]
+        if not urls:
+            return await status_message.edit_text("Не удалось прочитать ссылки для обработки.")
+
+        count = len(urls)
+        await status_message.edit_text(f"Сбор данных... ({count} ссылок)")
+        res_dir = await scraper_main(urls)
         
         if not res_dir:
             logger.warning(f"Парсер вернул пустой результат для {url}")

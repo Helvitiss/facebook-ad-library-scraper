@@ -34,8 +34,8 @@ class GraphQLClient:
         if cookies:
             self.client.cookies.update(cookies)
 
-    async def fetch_all_creatives(self, initial_page: GraphQLPage) -> list:
-        """Собирает все объявления, проходя по всем страницам пагинации."""
+    async def fetch_all_creatives(self, initial_page: GraphQLPage, limit: Optional[int] = None) -> list:
+        """Собирает объявления, проходя по страницам пагинации (опционально с лимитом)."""
         if initial_page is None:
             logger.error("fetch_all_creatives: initial_page is None!")
             return []
@@ -57,6 +57,9 @@ class GraphQLClient:
                 all_creatives.append(chunk)
                 
         logger.debug(f"Начальная страница: найдено {len(all_creatives)} элементов")
+
+        if limit and len(all_creatives) >= limit:
+            return all_creatives[:limit]
         
         next_page = initial_page
         logger.info(f"Начало пагинации. Стартовый курсор: {next_page.cursor}")
@@ -72,6 +75,8 @@ class GraphQLClient:
                     if cid and cid not in seen_ids:
                         seen_ids.add(cid)
                         all_creatives.append(chunk)
+                        if limit and len(all_creatives) >= limit:
+                            return all_creatives[:limit]
                 logger.debug(f"Подгружено скроллом. Всего сейчас: {len(all_creatives)}")
             else:
                 logger.warning("Курсор есть, но новые объявления не найдены.")
@@ -733,13 +738,13 @@ async def main(urls: List[str] = None):
                         cookies=init.cookies,
                         lsd=init.lsd
                     )
-                    raw = await gql.fetch_all_creatives(init)
+                    limit = 50 if config.data.debug_mode else None
+                    raw = await gql.fetch_all_creatives(init, limit=limit)
                     if not raw:
                         logger.warning(f"Объявления не найдены для {url}. Пропуск.")
                         continue
                         
                     if config.data.debug_mode:
-                        raw = raw[:50]
                         logger.info(f"Отладочный режим: ограничение количества объявлений до {len(raw)} и только проверка RSOC")
                         groups = await scraper.process_creatives_debug_rsoc_only(raw)
                         extractor = RSOCExtractor(proxy=scraper.proxy)

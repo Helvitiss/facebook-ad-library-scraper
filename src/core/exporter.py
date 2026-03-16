@@ -7,13 +7,15 @@ import re
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, TYPE_CHECKING
 
 import threading
 from loguru import logger
-from faster_whisper import WhisperModel
 from deep_translator import GoogleTranslator
 from langdetect import detect, DetectorFactory
+
+if TYPE_CHECKING:
+    from faster_whisper import WhisperModel
 
 # Устанавливаем seed для детерминированных результатов определения языка
 DetectorFactory.seed = 0
@@ -310,7 +312,7 @@ class Exporter:
             p.mkdir(parents=True)
             return p
 
-    _whisper_model: Optional[WhisperModel] = None
+    _whisper_model: Optional["WhisperModel"] = None
 
     def _has_audio(self, path: Path) -> bool:
         """Проверяет наличие аудиодорожки в файле с помощью библиотеки av."""
@@ -329,6 +331,7 @@ class Exporter:
         """Запускает транскрибацию всех найденных видеофайлов (последовательно)."""
         if Exporter._whisper_model is None:
             try:
+                from faster_whisper import WhisperModel
                 # Используем заранее загруженную модель из образа
                 model_path = "/app/models/whisper" if Path("/app/models/whisper").exists() else None
                 Exporter._whisper_model = WhisperModel(
@@ -360,7 +363,7 @@ class Exporter:
         for v in videos:
             self._transcribe(v, model)
 
-    def _transcribe(self, path: Path, model: WhisperModel):
+    def _transcribe(self, path: Path, model: "WhisperModel"):
         """Выполняет транскрибацию одного видеофайла и перевод на английский."""
         try:
             # 1. Проверка наличия аудио
