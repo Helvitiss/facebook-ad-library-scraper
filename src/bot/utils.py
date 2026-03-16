@@ -173,11 +173,12 @@ async def process_task(original_message: Message, status_message: Message, url_o
             return await status_message.edit_text("Не удалось прочитать ссылки для обработки.")
 
         count = len(urls)
+        url_label = urls[0] if count == 1 else f"{count} urls"
         await status_message.edit_text(f"Сбор данных... ({count} ссылок)")
         res_dir = await scraper_main(urls)
         
         if not res_dir:
-            logger.warning(f"Парсер вернул пустой результат для {url}")
+            logger.warning(f"Парсер вернул пустой результат для {url_label}")
             return await status_message.edit_text("Парсер не смог найти данные по этой ссылке. Возможно, поиск не дал результатов или доступ заблокирован.")
 
         if config.data.debug_mode:
@@ -206,13 +207,15 @@ async def process_task(original_message: Message, status_message: Message, url_o
         await exporter_main(res_dir)
 
         await status_message.edit_text("Упаковка...")
-        exp_base = Path(config.data.exporter.results_base_dir)
+        exp_base = Path(__file__).resolve().parent.parent.parent / config.data.exporter.results_base_dir
         subdirs = [d for d in exp_base.iterdir() if d.is_dir()]
         
         if not subdirs:
              return await status_message.edit_text("Ошибка экспорта (нет папок).")
         
         latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+        if not latest.exists():
+            return await status_message.edit_text("Ошибка экспорта (папка результатов не найдена).")
         domain_stats = defaultdict(lambda: {"reach": 0, "spend": 0.0})
         
         for folder in latest.iterdir():
@@ -291,7 +294,8 @@ async def process_task(original_message: Message, status_message: Message, url_o
         await status_message.delete()
         
     except Exception as e:
-        logger.exception(f"Task processing error for {url}")
+        safe_label = url_label if 'url_label' in locals() else "unknown"
+        logger.exception(f"Task processing error for {safe_label}")
         await original_message.answer(f"Ошибка обработки: {e}")
     finally:
         if 'sink_id' in locals():

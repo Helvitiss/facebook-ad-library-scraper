@@ -4,6 +4,7 @@ import time
 import httpx
 import pycountry
 import re
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -283,9 +284,12 @@ class Exporter:
             except Exception as e:
                 logger.debug(f"Translation failed for folder name: {e}")
             
-            # Очистка спецсимволов для Windows
-            t = re.sub(r'[<>:\"/\\|?*]', '', t).strip()
-            summary = f"[{t[:50]}...] "
+            # Очистка и нормализация для Windows (ASCII, без переносов/emoji)
+            t = self._sanitize_folder_fragment(t)
+            if t:
+                summary = f"[{t[:50]}...] "
+            else:
+                summary = "[No_text...] "
             
         # Суммируем все числовые значения из словаря охватов, избегая двойного счета
         # (если в словаре есть и EU_TOTAL и страны, лучше брать страны или только TOTAL)
@@ -294,6 +298,30 @@ class Exporter:
         total = sum(v for v in reaches.values() if isinstance(v, (int, float)))
              
         return f"{summary}Total_{total}"
+
+    def _sanitize_folder_fragment(self, text: str) -> str:
+        """Делает фрагмент имени папки безопасным для Windows."""
+        if not isinstance(text, str):
+            return ""
+        # Убираем управляющие и emoji/символьный шум
+        cleaned_chars = []
+        for ch in text:
+            cat = unicodedata.category(ch)
+            if cat.startswith("C"):  # control/format
+                continue
+            if cat == "So":  # symbols (emoji)
+                continue
+            cleaned_chars.append(ch)
+
+        s = "".join(cleaned_chars)
+        s = re.sub(r"\s+", " ", s)
+        s = re.sub(r'[<>:\"/\\|?*]', '', s)
+        s = s.strip(" .")
+
+        # Если нет букв/цифр — считаем пустым
+        if not re.search(r"[A-Za-zА-Яа-я0-9]", s):
+            return ""
+        return s
 
     def _create_results_dir(self):
         """Создает базовую директорию для результатов текущего запуска."""

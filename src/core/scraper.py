@@ -93,6 +93,12 @@ class GraphQLClient:
                 for limit_key in ["count", "first", "limit"]:
                     if limit_key in vars_:
                         vars_[limit_key] = 30
+
+                # Если нужных ключей лимита нет — добавляем оба (count/first)
+                if "count" not in vars_:
+                    vars_["count"] = vars_.get("first", 30)
+                if "first" not in vars_:
+                    vars_["first"] = vars_.get("count", 30)
                 
                 vars_["cursor"] = current_page.cursor
                 doc_id = current_page.doc_id or self.doc_ids["pagination"]
@@ -115,13 +121,19 @@ class GraphQLClient:
                     # Проверка на наличие ошибок в ответе (например, Rate Limit)
                     errors = data.get("errors", [])
                     if errors:
+                        rate_limited = False
                         for err in errors:
                             msg = err.get("message", "")
                             if "Rate limit" in msg or err.get("code") == 1675004:
                                 logger.error("❌ Facebook ограничил запросы (Rate Limit). Попробуйте сменить IP или подождать 10-15 мин.")
+                                rate_limited = True
                             else:
                                 logger.warning(f"Ошибка GQL: {msg}")
-                        return GraphQLPage(cursor=None, raw_creatives=[])
+                        if rate_limited:
+                            return GraphQLPage(cursor=None, raw_creatives=[])
+                        # Если ошибки есть, но данные пришли — продолжаем
+                        if not new_creatives and not new_cursor:
+                            return GraphQLPage(cursor=None, raw_creatives=[])
 
                     # Если данных нет или мало (структурная пустота), дампим для анализа
                     if not new_creatives:

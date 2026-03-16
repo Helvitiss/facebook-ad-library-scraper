@@ -86,6 +86,7 @@ def extract_variables(data: Any):
             import uuid
             # Базовые значения для пагинации
             fallback_vars.update({
+                "count": 30,
                 "first": 30, 
                 "cursor": None, 
                 "searchType": "page", 
@@ -144,13 +145,27 @@ def extract_text(creative_dict: dict):
     """Извлекает основной рекламный текст, игнорируя шаблоны."""
     snapshot = creative_dict.get("snapshot", {})
     if not snapshot: return None
+    def _valid_text(t: str) -> bool:
+        return isinstance(t, str) and t.strip() and "{{product.brand}}" not in t and "{{product.name}}" not in t
+
     body = snapshot.get("body") or {}
-    if text := body.get("text"):
-        if "{{product.brand}}" not in text and "{{product.name}}" not in text: return text
+    if _valid_text(body.get("text")):
+        return body.get("text").strip()
+
     for card in snapshot.get("cards", []):
         card_body = card.get("body")
-        if isinstance(card_body, dict) and (text := card_body.get("text")): return text
-        elif isinstance(card_body, str): return card_body
+        if isinstance(card_body, dict) and _valid_text(card_body.get("text")):
+            return card_body.get("text").strip()
+        if isinstance(card_body, str) and _valid_text(card_body):
+            return card_body.strip()
+        for key in ("title", "link_description", "caption", "subcaption"):
+            if _valid_text(card.get(key)):
+                return card.get(key).strip()
+
+    for key in ("title", "link_description", "caption", "subcaption", "headline"):
+        if _valid_text(snapshot.get(key)):
+            return snapshot.get(key).strip()
+
     return body.get("text")
 
 def extract_creatives_from_pagination(data: dict):
