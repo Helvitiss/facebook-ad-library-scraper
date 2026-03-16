@@ -81,18 +81,78 @@ class TelegramLogHandler:
         self.message = message
         self.loop = asyncio.get_running_loop()
         self.last_text = ""
+        self.last_level = ""
+        self.last_error_time = 0.0
         self.last_update_time = 0
         self.cooldown = 3.0 # Увеличенная задержка между обновлениями в секундах
         self.update_task = None
         self.pending_text = None
+        self.error_sticky_seconds = 12.0
+        self.info_allowlist = [
+            "Сбор данных",
+            "Загрузка и транскрибация",
+            "Упаковка",
+            "Отправка",
+            "Экспорт завершен",
+            "Начало транскрибации",
+            "Обработка",
+            "Данные успешно",
+            "Парсер не смог",
+            "Debug RSOC",
+        ]
+        self.noise_patterns = [
+            "Translated folder name task",
+            "Группа ",
+            "пропущена: охват",
+            "Transparency/AAA missing",
+            "RSOC:",
+            "Прокрутка:",
+            "GQL Payload",
+            "GQL Response",
+            "Found potential cursors",
+            "Успешно обработана группа",
+            "Найдено",
+            "Обработка дампа",
+        ]
         
     def write(self, log_record):
         try:
-            self.pending_text = log_record
+            clean_text = re.sub(r'<.*?>', '', str(log_record)).strip()
+            parts = clean_text.split('|', 1)
+            level = parts[0].strip() if len(parts) > 1 else ""
+            message = parts[1].strip() if len(parts) > 1 else clean_text
+
+            if level == "DEBUG":
+                return
+
+            if any(pat in message for pat in self.noise_patterns):
+                return
+
+            if level == "INFO" and not any(k in message for k in self.info_allowlist):
+                return
+
+            prefix = "[LOG]"
+            if level == "INFO": prefix = "[INFO]"
+            elif level == "SUCCESS": prefix = "[OK]"
+            elif level == "WARNING": prefix = "[WARN]"
+            elif level == "ERROR": prefix = "[ERR]"
+            elif level == "DEBUG": prefix = "[DBG]"
+
+            new_text = f"{prefix} {message}"
+
+            now = time.time()
+            if self.last_level in ("ERROR", "WARNING") and level not in ("ERROR", "WARNING"):
+                if now - self.last_error_time < self.error_sticky_seconds:
+                    return
+
+            if level in ("ERROR", "WARNING"):
+                self.last_error_time = now
+
+            self.pending_text = new_text
             now = time.time()
             if now - self.last_update_time >= self.cooldown:
                 self.last_update_time = now  # Немедленное обновление, чтобы избежать лавины тасок во время сетевого запроса
-                asyncio.run_coroutine_threadsafe(self.update_message(log_record), self.loop)
+                asyncio.run_coroutine_threadsafe(self.update_message(new_text, level), self.loop)
             else:
                 # Если мы в кулдауне, планируем обновление на потом, если еще не запланировано
                 if not self.update_task or self.update_task.done():
@@ -104,27 +164,15 @@ class TelegramLogHandler:
     async def _delayed_update(self, delay):
         await asyncio.sleep(delay)
         if self.pending_text:
-            await self.update_message(self.pending_text)
+            await self.update_message(self.pending_text, None)
 
-    async def update_message(self, log_record):
+    async def update_message(self, new_text, level):
         try:
-            text = log_record
-            clean_text = re.sub(r'<.*?>', '', text).strip()
-            
-            prefix = "[LOG]"
-            if "INFO" in clean_text: prefix = "[INFO]"
-            elif "SUCCESS" in clean_text: prefix = "[OK]"
-            elif "WARNING" in clean_text: prefix = "[WARN]"
-            elif "ERROR" in clean_text: prefix = "[ERR]"
-            elif "DEBUG" in clean_text: prefix = "[DBG]"
-            
-            parts = clean_text.split('|')
-            content = parts[-1].strip() if len(parts) > 1 else clean_text
-            new_text = f"{prefix} {content}"
-            
             if new_text == self.last_text: return
             
             self.last_text = new_text
+            if level:
+                self.last_level = level
             self.pending_text = None
             await self.message.edit_text(new_text)
         except aiogram.exceptions.TelegramRetryAfter as e:
