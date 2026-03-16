@@ -16,6 +16,9 @@ router = Router()
 router.include_router(settings_router)
 
 queue = asyncio.Queue()
+worker_tasks: list[asyncio.Task] = []
+worker_limit = 1
+worker_semaphore = asyncio.Semaphore(1)
 
 async def worker():
     """Фоновый воркер, обрабатывающий очередь задач (URL или список URL)."""
@@ -23,11 +26,38 @@ async def worker():
     while True:
         message, status_message, urls = await queue.get()
         try:
-            await process_task(message, status_message, urls)
+            async with worker_semaphore:
+                await process_task(message, status_message, urls)
         except Exception as e:
             logger.exception(f"Worker process error: {e}")
         finally:
             queue.task_done()
+
+def _target_worker_limit() -> int:
+    if config.data.debug_mode:
+        return max(1, int(getattr(config.data.scraper, "url_workers", 1) or 1))
+    return 1
+
+async def _reduce_tokens(count: int):
+    for _ in range(count):
+        await worker_semaphore.acquire()
+
+async def set_worker_limit(target: int):
+    """Динамически меняет лимит параллельных воркеров."""
+    global worker_limit
+    target = max(1, int(target or 1))
+    if target > len(worker_tasks):
+        for _ in range(target - len(worker_tasks)):
+            worker_tasks.append(asyncio.create_task(worker()))
+
+    diff = target - worker_limit
+    if diff > 0:
+        for _ in range(diff):
+            worker_semaphore.release()
+    elif diff < 0:
+        asyncio.create_task(_reduce_tokens(-diff))
+
+    worker_limit = target
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -58,6 +88,7 @@ async def cmd_debug(message: Message):
     
     # Сохраняем изменения в файл
     if config.save(config.data):
+        await set_worker_limit(_target_worker_limit())
         new_state_str = "ВКЛЮЧЕН 🟢 (Лимит 50 объявлений, только проверка RSOC-ключей)" if config.data.debug_mode else "ВЫКЛЮЧЕН 🔴 (Полный масштабный парсинг)"
         await message.answer(f"Отладочный режим <b>{new_state_str}</b>.", parse_mode="HTML")
     else:
@@ -174,6 +205,4 @@ async def process_kw_url_step(message: Message, state: FSMContext):
 
 async def start_worker():
     """Запускает асинхронный воркер обработки очереди."""
-    workers = max(1, int(getattr(config.data.scraper, "url_workers", 1) or 1))
-    for _ in range(workers):
-        asyncio.create_task(worker())
+    await set_worker_limit(_target_worker_limit())
