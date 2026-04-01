@@ -395,10 +395,18 @@ class Exporter:
                 # Используем заранее загруженную модель из образа
                 model_path = "/app/models/whisper" if Path("/app/models/whisper").exists() else None
                 Exporter._whisper_model = WhisperModel(
-                    "base", 
-                    device="cpu", 
-                    compute_type="int8", 
+                    config.data.exporter.whisper_model,
+                    device=config.data.exporter.whisper_device,
+                    compute_type=config.data.exporter.whisper_compute_type,
                     download_root=model_path
+                )
+                logger.info(
+                    "Whisper инициализирован: "
+                    f"model={config.data.exporter.whisper_model}, "
+                    f"device={config.data.exporter.whisper_device}, "
+                    f"compute_type={config.data.exporter.whisper_compute_type}, "
+                    f"beam={config.data.exporter.transcription_beam_size}, "
+                    f"vad_filter={config.data.exporter.transcription_vad_filter}"
                 )
             except Exception as e:
                 logger.error(f"Не удалось инициализировать Whisper: {e}")
@@ -442,7 +450,15 @@ class Exporter:
                 return
 
             # 2. Транскрибация
-            segments, _ = model.transcribe(str(path))
+            segments, _ = model.transcribe(
+                str(path),
+                beam_size=config.data.exporter.transcription_beam_size,
+                best_of=config.data.exporter.transcription_best_of,
+                patience=config.data.exporter.transcription_patience,
+                vad_filter=config.data.exporter.transcription_vad_filter,
+                condition_on_previous_text=config.data.exporter.transcription_condition_on_previous_text,
+                temperature=config.data.exporter.transcription_temperature,
+            )
             
             # Собираем сегменты в текст, обрабатывая возможные ошибки итерации
             text_parts = []

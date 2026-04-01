@@ -22,7 +22,16 @@
     "retry_delay_seconds": 5,
     "min_reaches": 0,
     "min_reaches_eu": 0,
-    "min_reaches_uk": 0
+    "min_reaches_uk": 0,
+    "whisper_model": "base",
+    "whisper_device": "cpu",
+    "whisper_compute_type": "int8",
+    "transcription_beam_size": 1,
+    "transcription_best_of": 1,
+    "transcription_patience": 1.0,
+    "transcription_vad_filter": true,
+    "transcription_condition_on_previous_text": false,
+    "transcription_temperature": 0.0
   },
   "facebook_api": {
     "endpoint_url": "https://www.facebook.com/api/graphql/",
