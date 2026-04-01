@@ -4,6 +4,7 @@ import re
 import time
 import shutil
 import os
+import zipfile
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
@@ -78,22 +79,59 @@ def _format_rsoc_by_link(grouped: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
-def _split_file(file_path: Path, chunk_size: int = TELEGRAM_MAX_FILE_SIZE) -> list[Path]:
-    """Разбивает большой файл на части, пригодные для отправки через Telegram."""
-    parts: list[Path] = []
-    with open(file_path, "rb") as src:
-        part_index = 1
-        while True:
-            chunk = src.read(chunk_size)
-            if not chunk:
-                break
+def _get_path_size(path: Path) -> int:
+    """Возвращает суммарный размер файла или директории в байтах."""
+    if path.is_file():
+        return path.stat().st_size
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
 
-            part_path = file_path.with_name(f"{file_path.name}.part{part_index:02d}")
-            with open(part_path, "wb") as dst:
-                dst.write(chunk)
-            parts.append(part_path)
-            part_index += 1
-    return parts
+
+def _build_grouped_archives(
+    source_dir: Path,
+    archive_base_name: str,
+    max_archive_size: int = TELEGRAM_MAX_FILE_SIZE,
+) -> list[Path]:
+    """Собирает несколько ZIP-архивов из отдельных групп результатов."""
+    root_files = [p for p in source_dir.iterdir() if p.is_file()]
+    groups = [p for p in source_dir.iterdir() if p.is_dir()]
+
+    items: list[tuple[Path, int]] = [(path, _get_path_size(path)) for path in groups]
+    if root_files:
+        root_bundle = source_dir / "__root_files__"
+        root_size = sum(_get_path_size(path) for path in root_files)
+        items.insert(0, (root_bundle, root_size))
+
+    batches: list[list[Path]] = []
+    current_batch: list[Path] = []
+    current_size = 0
+
+    for path, size in items:
+        if current_batch and current_size + size > max_archive_size:
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 0
+        current_batch.append(path)
+        current_size += size
+
+    if current_batch:
+        batches.append(current_batch)
+
+    archives: list[Path] = []
+    for index, batch in enumerate(batches, 1):
+        archive_path = source_dir.parent / f"{archive_base_name}_part{index:02d}.zip"
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for item in batch:
+                if item.name == "__root_files__":
+                    for root_file in root_files:
+                        archive.write(root_file, root_file.relative_to(source_dir))
+                    continue
+
+                for file_path in item.rglob("*"):
+                    if file_path.is_file():
+                        archive.write(file_path, file_path.relative_to(source_dir))
+        archives.append(archive_path)
+
+    return archives
 
 class TelegramLogHandler:
     """Перехватчик логов для отправки их в сообщение Telegram (status message)."""
@@ -358,31 +396,37 @@ async def process_task(original_message: Message, status_message: Message, url_o
             )
         except aiogram.exceptions.TelegramEntityTooLarge:
             logger.warning(f"Архив слишком большой для Telegram: {zip_file}")
-            await status_message.edit_text("Архив слишком большой, разбиваю на части...")
+            await status_message.edit_text("Архив слишком большой, делю результат на несколько ZIP по группам ссылок...")
 
             zip_path = Path(zip_file)
-            part_files = _split_file(zip_path)
-            generated_files.extend(part_files)
+            grouped_archives = _build_grouped_archives(latest, zip_name)
+            generated_files.extend(grouped_archives)
 
-            if not part_files:
+            if not grouped_archives:
                 raise
 
             await original_message.answer(
                 "Результат слишком большой для одного файла. "
-                "Отправляю архив частями; чтобы собрать его локально, объедините части по порядку."
+                "Отправляю несколько самостоятельных ZIP-архивов, разбитых по группам ссылок."
             )
 
-            for idx, part_file in enumerate(part_files, 1):
+            for idx, part_file in enumerate(grouped_archives, 1):
                 part_caption = (
-                    f"{caption}\n\nЧасть {idx}/{len(part_files)}"
-                    if idx == 1 else f"Часть {idx}/{len(part_files)}"
+                    f"{caption}\n\nАрхив {idx}/{len(grouped_archives)}"
+                    if idx == 1 else f"Архив {idx}/{len(grouped_archives)}"
                 )
-                await original_message.reply_document(
-                    document=FSInputFile(part_file),
-                    caption=part_caption[:1024],
-                    parse_mode="HTML" if idx == 1 else None,
-                    request_timeout=300
-                )
+                try:
+                    await original_message.reply_document(
+                        document=FSInputFile(part_file),
+                        caption=part_caption[:1024],
+                        parse_mode="HTML" if idx == 1 else None,
+                        request_timeout=300
+                    )
+                except aiogram.exceptions.TelegramEntityTooLarge:
+                    logger.error(f"Даже отдельный архив слишком большой для Telegram: {part_file}")
+                    await original_message.answer(
+                        f"Не удалось отправить {part_file.name}: даже отдельный ZIP превышает лимит Telegram."
+                    )
         
         try:
             for file_path in generated_files:
