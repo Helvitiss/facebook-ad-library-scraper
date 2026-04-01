@@ -355,6 +355,38 @@ class Exporter:
             # Если не удалось проверить, пробуем транскрибировать (на всякий случай)
             return True
 
+    def _get_media_duration_seconds(self, path: Path) -> Optional[float]:
+        """Возвращает длительность медиафайла в секундах, если её удалось определить."""
+        try:
+            import av
+
+            container = av.open(str(path))
+            try:
+                if container.duration:
+                    return float(container.duration) / 1_000_000
+
+                video_stream = next(iter(container.streams.video), None)
+                if video_stream and video_stream.duration and video_stream.time_base:
+                    return float(video_stream.duration * video_stream.time_base)
+            finally:
+                container.close()
+        except Exception as e:
+            logger.debug(f"Не удалось определить длительность {path.name}: {e}")
+        return None
+
+    @staticmethod
+    def _format_seconds(seconds: Optional[float]) -> str:
+        """Форматирует секунды в MM:SS или HH:MM:SS."""
+        if seconds is None:
+            return "?:??"
+
+        total_seconds = max(0, int(seconds))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
     def _process_transcriptions(self):
         """Запускает транскрибацию всех найденных видеофайлов (последовательно)."""
         if Exporter._whisper_model is None:
@@ -388,15 +420,25 @@ class Exporter:
         
         logger.info(f"Обработка {len(videos)} видео для транскрибации...")
         # Последовательная обработка для экономии CPU и во избежание ошибок с потоками в Docker
-        for v in videos:
-            self._transcribe(v, model)
+        total_videos = len(videos)
+        for index, video in enumerate(videos, 1):
+            self._transcribe(video, model, index, total_videos)
 
-    def _transcribe(self, path: Path, model: "WhisperModel"):
+    def _transcribe(self, path: Path, model: "WhisperModel", index: int, total: int):
         """Выполняет транскрибацию одного видеофайла и перевод на английский."""
         try:
+            duration_seconds = self._get_media_duration_seconds(path)
+            logger.info(
+                f"Транскрибация {index}/{total}: {path.name}"
+                + (
+                    f" ({self._format_seconds(duration_seconds)})"
+                    if duration_seconds is not None else ""
+                )
+            )
+
             # 1. Проверка наличия аудио
             if not self._has_audio(path):
-                logger.debug(f"Видео {path.name} не содержит аудиодорожки, пропуск транскрибации.")
+                logger.info(f"Транскрибация {index}/{total}: {path.name} пропущена, аудио не найдено.")
                 return
 
             # 2. Транскрибация
@@ -404,14 +446,39 @@ class Exporter:
             
             # Собираем сегменты в текст, обрабатывая возможные ошибки итерации
             text_parts = []
+            segments_count = 0
+            last_logged_step = -1
+            last_logged_segment = 0
             try:
                 for segment in segments:
-                    text_parts.append(segment.text.strip())
+                    segment_text = segment.text.strip()
+                    if segment_text:
+                        text_parts.append(segment_text)
+
+                    segments_count += 1
+
+                    if duration_seconds and duration_seconds > 0:
+                        current_seconds = min(float(segment.end), duration_seconds)
+                        percent = min(100, int((current_seconds / duration_seconds) * 100))
+                        progress_step = percent // 10
+                        if progress_step > last_logged_step:
+                            last_logged_step = progress_step
+                            logger.info(
+                                f"Транскрибация {index}/{total}: {path.name} {percent}% "
+                                f"({self._format_seconds(current_seconds)}/{self._format_seconds(duration_seconds)}), "
+                                f"сегментов: {segments_count}"
+                            )
+                    elif segments_count - last_logged_segment >= 5:
+                        last_logged_segment = segments_count
+                        logger.info(
+                            f"Транскрибация {index}/{total}: {path.name}, обработано сегментов: {segments_count}"
+                        )
             except Exception as e:
                 logger.warning(f"Ошибка при чтении сегментов видео {path.name}: {e}")
             
             text = "\n".join(text_parts).strip()
             if not text:
+                logger.info(f"Транскрибация {index}/{total}: {path.name} завершена без распознанного текста.")
                 return
 
             # 3. Перевод текста транскрипции на английский
@@ -426,6 +493,10 @@ class Exporter:
             out_file = path.parent / config.data.exporter.transcription_filename
             with open(out_file, "w", encoding="utf-8") as f:
                 f.write(f"Original:\n{text}\n\nTranslation (EN):\n{trans}")
+            logger.info(
+                f"Транскрибация {index}/{total}: {path.name} завершена, "
+                f"сегментов: {segments_count}, файл: {out_file.name}"
+            )
         except Exception as e:
             import traceback
             logger.error(f"Ошибка транскрибации {path.name}: {e}\n{traceback.format_exc()}")
