@@ -19,6 +19,8 @@ from src.core.rsoc import RSOCExtractor
 
 import aiogram.exceptions
 
+TELEGRAM_MAX_FILE_SIZE = 49 * 1024 * 1024
+
 
 def _collect_rsoc_by_link(result_dir: Path) -> dict[str, list[str]]:
     """Собирает RSOC-ключи из JSON-дампов в разрезе link_url."""
@@ -74,6 +76,24 @@ def _format_rsoc_by_link(grouped: dict[str, list[str]]) -> str:
     lines.append(f"Total links: {len(grouped)}")
     lines.append(f"Total keywords: {total}")
     return "\n".join(lines)
+
+
+def _split_file(file_path: Path, chunk_size: int = TELEGRAM_MAX_FILE_SIZE) -> list[Path]:
+    """Разбивает большой файл на части, пригодные для отправки через Telegram."""
+    parts: list[Path] = []
+    with open(file_path, "rb") as src:
+        part_index = 1
+        while True:
+            chunk = src.read(chunk_size)
+            if not chunk:
+                break
+
+            part_path = file_path.with_name(f"{file_path.name}.part{part_index:02d}")
+            with open(part_path, "wb") as dst:
+                dst.write(chunk)
+            parts.append(part_path)
+            part_index += 1
+    return parts
 
 class TelegramLogHandler:
     """Перехватчик логов для отправки их в сообщение Telegram (status message)."""
@@ -328,15 +348,46 @@ async def process_task(original_message: Message, status_message: Message, url_o
             await original_message.answer(caption, parse_mode="HTML")
             caption = f"Результаты обработки\nTotal Spend: ${total_spend:.2f}\nTotal Reaches: {total_reach:,}"
         
-        await original_message.reply_document(
-            document=FSInputFile(zip_file), 
-            caption=caption,
-            parse_mode="HTML",
-            request_timeout=300
-        )
+        generated_files = [Path(zip_file)]
+        try:
+            await original_message.reply_document(
+                document=FSInputFile(zip_file),
+                caption=caption,
+                parse_mode="HTML",
+                request_timeout=300
+            )
+        except aiogram.exceptions.TelegramEntityTooLarge:
+            logger.warning(f"Архив слишком большой для Telegram: {zip_file}")
+            await status_message.edit_text("Архив слишком большой, разбиваю на части...")
+
+            zip_path = Path(zip_file)
+            part_files = _split_file(zip_path)
+            generated_files.extend(part_files)
+
+            if not part_files:
+                raise
+
+            await original_message.answer(
+                "Результат слишком большой для одного файла. "
+                "Отправляю архив частями; чтобы собрать его локально, объедините части по порядку."
+            )
+
+            for idx, part_file in enumerate(part_files, 1):
+                part_caption = (
+                    f"{caption}\n\nЧасть {idx}/{len(part_files)}"
+                    if idx == 1 else f"Часть {idx}/{len(part_files)}"
+                )
+                await original_message.reply_document(
+                    document=FSInputFile(part_file),
+                    caption=part_caption[:1024],
+                    parse_mode="HTML" if idx == 1 else None,
+                    request_timeout=300
+                )
         
         try:
-            os.remove(zip_file)
+            for file_path in generated_files:
+                if file_path.exists():
+                    os.remove(file_path)
             shutil.rmtree(res_dir)
             shutil.rmtree(latest)
         except: pass
