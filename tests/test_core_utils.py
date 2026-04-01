@@ -5,7 +5,8 @@ from src.core.core_utils import (
     extract_script_info,
     extract_video_urls,
     extract_image_urls,
-    extract_text
+    extract_text,
+    extract_variables,
 )
 
 def test_recursively_extract_value():
@@ -92,3 +93,24 @@ def test_extract_text():
         }
     }
     assert extract_text(data3) == "Card text"
+
+
+def test_extract_variables_from_ads_library_url_keeps_search_and_sort():
+    url = (
+        "https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL"
+        "&is_targeted_country=false&media_type=all&q=johnnyandcash.com"
+        "&search_type=keyword_unordered&sort_data[mode]=total_impressions"
+        "&sort_data[direction]=desc"
+    )
+
+    vars_ = extract_variables(url)
+
+    assert vars_["adType"] == "ALL"
+    assert vars_["activeStatus"] == "ACTIVE"
+    assert vars_["countries"] == ["ALL"]
+    assert vars_["isTargetedCountry"] is False
+    assert vars_["mediaType"] == "all"
+    assert vars_["searchType"] == "keyword_unordered"
+    assert vars_["queryString"] == "johnnyandcash.com"
+    assert vars_["sortData"]["mode"] == "SORT_BY_TOTAL_IMPRESSIONS"
+    assert vars_["sortData"]["direction"] == "DESCENDING"

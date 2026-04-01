@@ -8,6 +8,9 @@ class GraphQLPage:
     raw_creatives: list = field(default_factory=list)
     variables: Optional[dict] = None
     doc_id: Optional[str] = None
+    pagination_doc_ids: List[str] = field(default_factory=list)
+    payload_template: Dict[str, str] = field(default_factory=dict)
+    request_headers: Dict[str, str] = field(default_factory=dict)
     cookies: Dict[str, str] = field(default_factory=dict)
     lsd: Optional[str] = None
 

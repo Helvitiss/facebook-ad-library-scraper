@@ -76,16 +76,65 @@ def extract_variables(data: Any):
             except: pass
             
         # Fallback: пробуем собрать переменные из отдельных параметров URL
+        def _to_bool(v):
+            if isinstance(v, bool):
+                return v
+            if v is None:
+                return None
+            return str(v).strip().lower() in {"1", "true", "yes", "y"}
+
+        def _map_search_type(v: str) -> str:
+            if not v:
+                return "page"
+            return str(v).strip().lower()
+
+        def _map_sort_mode(v: str) -> str:
+            if not v:
+                return "SORT_BY_TOTAL_IMPRESSIONS"
+            val = str(v).strip().lower()
+            mapping = {
+                "total_impressions": "SORT_BY_TOTAL_IMPRESSIONS",
+                "relevancy_monthly_grouped": "RELEVANCY_MONTHLY_GROUPED",
+            }
+            return mapping.get(val, str(v).upper())
+
+        def _map_sort_direction(v: str) -> str:
+            if not v:
+                return "DESCENDING"
+            val = str(v).strip().lower()
+            mapping = {
+                "desc": "DESCENDING",
+                "descending": "DESCENDING",
+                "asc": "ASCENDING",
+                "ascending": "ASCENDING",
+            }
+            return mapping.get(val, str(v).upper())
+
         fallback_vars = {}
         if pid := params.get("view_all_page_id", [None])[0]: fallback_vars["viewAllPageID"] = pid
-        if ad_type := params.get("ad_type", [None])[0]: fallback_vars["adType"] = ad_type.upper()
+        if ad_type := params.get("ad_type", [None])[0]: fallback_vars["adType"] = str(ad_type).upper()
         if country := params.get("country", [None])[0]: fallback_vars["countries"] = [country]
-        if status := params.get("active_status", [None])[0]: fallback_vars["activeStatus"] = status
+        if status := params.get("active_status", [None])[0]: fallback_vars["activeStatus"] = str(status).upper()
+        if media_type := params.get("media_type", [None])[0]: fallback_vars["mediaType"] = media_type
+        if search_type := params.get("search_type", [None])[0]: fallback_vars["searchType"] = _map_search_type(search_type)
+        if query := params.get("q", [None])[0]: fallback_vars["queryString"] = query
+        if targeted := params.get("is_targeted_country", [None])[0]:
+            parsed_targeted = _to_bool(targeted)
+            if parsed_targeted is not None:
+                fallback_vars["isTargetedCountry"] = parsed_targeted
+
+        sort_mode = params.get("sort_data[mode]", [None])[0]
+        sort_direction = params.get("sort_data[direction]", [None])[0]
+        if sort_mode or sort_direction:
+            fallback_vars["sortData"] = {
+                "mode": _map_sort_mode(sort_mode),
+                "direction": _map_sort_direction(sort_direction),
+            }
         
         if fallback_vars:
             import uuid
             # Базовые значения для пагинации
-            fallback_vars.update({
+            defaults = {
                 "count": 30,
                 "first": 30, 
                 "cursor": None, 
@@ -106,7 +155,9 @@ def extract_variables(data: Any):
                 "startDate": None,
                 "v": "3ba1ef",
                 "sortData": {"mode": "SORT_BY_TOTAL_IMPRESSIONS", "direction": "DESCENDING"}
-            })
+            }
+            for k, v in defaults.items():
+                fallback_vars.setdefault(k, v)
             return fallback_vars
             
         return None

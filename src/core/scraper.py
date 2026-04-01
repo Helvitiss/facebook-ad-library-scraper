@@ -1,8 +1,9 @@
 import asyncio
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -25,12 +26,24 @@ class RateLimitExceededError(Exception):
 class GraphQLClient:
     """Клиент для взаимодействия с GraphQL API Facebook."""
     
-    def __init__(self, http_client: httpx.AsyncClient, endpoint_url: str, doc_ids: dict, cookies: dict = None, lsd: str = None):
+    def __init__(
+        self,
+        http_client: httpx.AsyncClient,
+        endpoint_url: str,
+        doc_ids: dict,
+        cookies: dict = None,
+        lsd: str = None,
+        on_pagination_rate_limit: Optional[Callable[[], Awaitable[bool]]] = None,
+    ):
         self.client = http_client
         self.endpoint_url = endpoint_url
         self.doc_ids = doc_ids
         self.initial_variables = {}
+        self.payload_template = {}
+        self.pagination_doc_ids = []
+        self.request_headers = {}
         self.lsd = lsd
+        self.on_pagination_rate_limit = on_pagination_rate_limit
         if cookies:
             self.client.cookies.update(cookies)
 
@@ -45,6 +58,9 @@ class GraphQLClient:
             self.initial_variables = {}
         else:
             self.initial_variables = initial_page.variables.copy()
+        self.payload_template = (initial_page.payload_template or {}).copy() if initial_page else {}
+        self.pagination_doc_ids = list(initial_page.pagination_doc_ids or []) if initial_page else []
+        self.request_headers = (initial_page.request_headers or {}).copy() if initial_page else {}
             
         seen_ids, all_creatives = set(), []
         
@@ -62,6 +78,8 @@ class GraphQLClient:
             return all_creatives[:limit]
         
         next_page = initial_page
+        consecutive_empty_pages = 0
+        max_consecutive_empty_pages = 2
         logger.info(f"Начало пагинации. Стартовый курсор: {next_page.cursor}")
         
         while next_page.cursor:
@@ -69,6 +87,7 @@ class GraphQLClient:
             next_page = await self._fetch_next_page(next_page)
             
             if next_page.raw_creatives:
+                consecutive_empty_pages = 0
                 for chunk in next_page.raw_creatives:
                     if not chunk: continue
                     cid = chunk[0].get("collation_id") or chunk[0].get("ad_archive_id")
@@ -80,39 +99,164 @@ class GraphQLClient:
                 logger.debug(f"Подгружено скроллом. Всего сейчас: {len(all_creatives)}")
             else:
                 logger.warning("Курсор есть, но новые объявления не найдены.")
+                consecutive_empty_pages += 1
+                if next_page.cursor and consecutive_empty_pages <= max_consecutive_empty_pages:
+                    logger.warning(
+                        f"Pagination returned empty page ({consecutive_empty_pages}/{max_consecutive_empty_pages}), continuing..."
+                    )
+                    continue
                 break
                 
         return all_creatives
 
     async def _fetch_next_page(self, current_page: GraphQLPage) -> GraphQLPage:
         """Запрашивает следующую страницу результатов."""
-        for i in range(config.data.scraper.retries_per_creative):
+        max_pagination_retries = max(
+            1,
+            int(getattr(config.data.scraper, "pagination_retries", config.data.scraper.retries_per_creative)),
+        )
+        max_rate_limit_retries = max(
+            1,
+            int(getattr(config.data.scraper, "pagination_rate_limit_retries", 3)),
+        )
+        rate_limit_hits = 0
+        base_page_size = (
+            self.initial_variables.get("count")
+            or self.initial_variables.get("first")
+            or self.initial_variables.get("limit")
+            or 30
+        )
+        current_page_size = max(6, int(base_page_size))
+        for i in range(max_pagination_retries):
             try:
                 vars_ = self.initial_variables.copy()
+                if rate_limit_hits > 0:
+                    if "sessionID" in vars_:
+                        vars_["sessionID"] = str(uuid.uuid4())
+                    if "sessionId" in vars_:
+                        vars_["sessionId"] = str(uuid.uuid4())
                 # Форсируем лимит, чтобы не застревать на порциях по 6 штук
                 for limit_key in ["count", "first", "limit"]:
                     if limit_key in vars_:
-                        vars_[limit_key] = 30
+                        vars_[limit_key] = current_page_size
 
                 # Если нужных ключей лимита нет — добавляем оба (count/first)
                 if "count" not in vars_:
-                    vars_["count"] = vars_.get("first", 30)
+                    vars_["count"] = vars_.get("first", current_page_size)
                 if "first" not in vars_:
-                    vars_["first"] = vars_.get("count", 30)
+                    vars_["first"] = vars_.get("count", current_page_size)
                 
                 vars_["cursor"] = current_page.cursor
-                doc_id = current_page.doc_id or self.doc_ids["pagination"]
-                payload = {"variables": json.dumps(vars_), "doc_id": doc_id}
-                if self.lsd: payload["lsd"] = self.lsd
-                
-                logger.debug(f"GQL Payload: doc_id={doc_id}, variables keys={list(vars_.keys())}")
-                
+                candidate_doc_ids = []
+                for candidate in (
+                    current_page.doc_id,
+                    *self.pagination_doc_ids,
+                    self.doc_ids.get("pagination"),
+                ):
+                    if not candidate:
+                        continue
+                    c = str(candidate)
+                    if c not in candidate_doc_ids:
+                        candidate_doc_ids.append(c)
+
                 await config.IP_READY_EVENT.wait()
-                resp = await self.client.post(self.endpoint_url, data=payload)
+                resp = None
+                for doc_id in candidate_doc_ids:
+                    payload = {}
+                    # Reuse browser payload extras only for browser-derived doc_ids.
+                    if doc_id in set(self.pagination_doc_ids or []) or (
+                        current_page.doc_id and doc_id == str(current_page.doc_id)
+                    ):
+                        payload = dict(self.payload_template or {})
+                    payload["variables"] = json.dumps(vars_)
+                    payload["doc_id"] = doc_id
+                    if self.lsd and "lsd" not in payload:
+                        payload["lsd"] = self.lsd
+
+                    logger.debug(
+                        f"GQL Payload: doc_id={doc_id}, page_size={current_page_size}, variables keys={list(vars_.keys())}"
+                    )
+                    probe_resp = await self.client.post(
+                        self.endpoint_url,
+                        data=payload,
+                        headers=(self.request_headers or None),
+                    )
+                    if probe_resp.status_code != 200:
+                        resp = probe_resp
+                        break
+                    try:
+                        probe_json = probe_resp.json()
+                    except Exception as e:
+                        logger.warning(f"Doc_id {doc_id} returned non-JSON response: {e}")
+                        if doc_id != candidate_doc_ids[-1]:
+                            continue
+                        resp = probe_resp
+                        break
+                    probe_errors = probe_json.get("errors", [])
+                    probe_rate_limited = any(
+                        ("rate limit" in str(err.get("message", "")).lower()) or err.get("code") == 1675004
+                        for err in probe_errors
+                    )
+                    probe_creatives = extract_creatives_from_pagination(probe_json)
+                    probe_cursor = extract_cursor(probe_json)
+                    probe_empty = (not probe_creatives) and (not probe_cursor)
+                    probe_schema_mismatch = any(
+                        "missing_required_variable_value" in str(err.get("message", "")).lower()
+                        or "noncoercible_argument_value" in str(err.get("message", "")).lower()
+                        for err in probe_errors
+                    )
+                    if probe_schema_mismatch and doc_id != candidate_doc_ids[-1]:
+                        logger.warning(
+                            f"Doc_id {doc_id} returned variable schema errors, trying next candidate..."
+                        )
+                        continue
+                    if probe_rate_limited and doc_id != candidate_doc_ids[-1]:
+                        logger.warning(f"Doc_id {doc_id} appears rate-limited, trying next candidate...")
+                        continue
+                    if probe_empty and doc_id != candidate_doc_ids[-1]:
+                        logger.warning(f"Doc_id {doc_id} returned empty pagination page, trying next candidate...")
+                        continue
+                    resp = probe_resp
+                    break
+
+                if resp is None:
+                    logger.warning("Pagination request skipped: no doc_id candidates available")
+                    return GraphQLPage(cursor=None, raw_creatives=[])
+
+                if resp.status_code == 429:
+                    rate_limit_hits += 1
+                    if rate_limit_hits > max_rate_limit_retries:
+                        logger.error("Pagination stopped after rate-limit retries.")
+                        return GraphQLPage(cursor=None, raw_creatives=[])
+
+                    new_page_size = max(6, current_page_size // 2)
+                    if new_page_size != current_page_size:
+                        logger.warning(
+                            f"Pagination page size reduced: {current_page_size} -> {new_page_size} due to rate limit"
+                        )
+                        current_page_size = new_page_size
+
+                    ip_changed = False
+                    if self.on_pagination_rate_limit:
+                        try:
+                            ip_changed = bool(await self.on_pagination_rate_limit())
+                        except Exception as e:
+                            logger.warning(f"Pagination rate-limit handler failed: {e}")
+
+                    wait_seconds = min(90, (4 * rate_limit_hits) if ip_changed else (8 * rate_limit_hits))
+                    logger.warning(
+                        f"Pagination rate limit retry {rate_limit_hits}/{max_rate_limit_retries}, waiting {wait_seconds}s..."
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    continue
                 
                 # Сохраняем дамп для отладки, если пагинация вернула пустоту или мало данных
                 if resp.status_code == 200:
-                    data = resp.json()
+                    try:
+                        data = resp.json()
+                    except Exception as e:
+                        logger.warning(f"Pagination response is not JSON: {e}")
+                        raise httpx.HTTPError("Non-JSON pagination response")
                     new_creatives = extract_creatives_from_pagination(data)
                     new_cursor = extract_cursor(data)
                     
@@ -123,14 +267,41 @@ class GraphQLClient:
                     if errors:
                         rate_limited = False
                         for err in errors:
-                            msg = err.get("message", "")
-                            if "Rate limit" in msg or err.get("code") == 1675004:
-                                logger.error("❌ Facebook ограничил запросы (Rate Limit). Попробуйте сменить IP или подождать 10-15 мин.")
+                            msg = str(err.get("message", ""))
+                            code = err.get("code")
+                            if "rate limit" in msg.lower() or code == 1675004:
+                                logger.error(
+                                    f"❌ Facebook ограничил запросы (Rate Limit). code={code}, message={msg}"
+                                )
                                 rate_limited = True
                             else:
                                 logger.warning(f"Ошибка GQL: {msg}")
                         if rate_limited:
-                            return GraphQLPage(cursor=None, raw_creatives=[])
+                            rate_limit_hits += 1
+                            if rate_limit_hits > max_rate_limit_retries:
+                                logger.error("Pagination stopped after rate-limit retries.")
+                                return GraphQLPage(cursor=None, raw_creatives=[])
+
+                            new_page_size = max(6, current_page_size // 2)
+                            if new_page_size != current_page_size:
+                                logger.warning(
+                                    f"Pagination page size reduced: {current_page_size} -> {new_page_size} due to rate limit"
+                                )
+                                current_page_size = new_page_size
+
+                            ip_changed = False
+                            if self.on_pagination_rate_limit:
+                                try:
+                                    ip_changed = bool(await self.on_pagination_rate_limit())
+                                except Exception as e:
+                                    logger.warning(f"Pagination rate-limit handler failed: {e}")
+
+                            wait_seconds = min(90, (4 * rate_limit_hits) if ip_changed else (8 * rate_limit_hits))
+                            logger.warning(
+                                f"Pagination rate limit retry {rate_limit_hits}/{max_rate_limit_retries}, waiting {wait_seconds}s..."
+                            )
+                            await asyncio.sleep(wait_seconds)
+                            continue
                         # Если ошибки есть, но данные пришли — продолжаем
                         if not new_creatives and not new_cursor:
                             return GraphQLPage(cursor=None, raw_creatives=[])
@@ -258,6 +429,15 @@ class Scraper:
             finally:
                 config.IP_READY_EVENT.set()
 
+    async def handle_pagination_rate_limit(self) -> bool:
+        """Try to recover from pagination rate limit and report whether IP was changed."""
+        try:
+            new_ip = await self._change_proxy_ip()
+            return bool(new_ip)
+        except Exception as e:
+            logger.warning(f"Pagination rate-limit recovery failed: {e}")
+            return False
+
     async def get_initial_data(self, browser: Browser, url: str) -> GraphQLPage:
         """Инициализирует сессию в браузере и перехватывает POST-запросы к GraphQL."""
         page = await browser.new_page()
@@ -281,7 +461,7 @@ class Scraper:
             for i in range(3):
                 try:
                     gql_responses.clear()
-                    await page.goto(url, wait_until="load", timeout=45000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     
                     # Небольшая пауза перед скроллом для стабильности контекста
                     await asyncio.sleep(2)
@@ -309,6 +489,12 @@ class Scraper:
 
                     best_page = GraphQLPage()
                     max_creatives = 0
+                    fallback_doc_id = None
+                    fallback_doc_ids = []
+                    fallback_vars = None
+                    fallback_payload_template = {}
+                    fallback_request_headers = {}
+                    browser_vars_context = None
 
                     for resp in gql_responses:
                         try:
@@ -316,7 +502,6 @@ class Scraper:
                                 
                             data = await resp.json()
                             raw = extract_creatives(data)
-                            if not raw: continue
 
                             # Считаем количество найденных креативов
                             creatives_count = len(raw)
@@ -327,15 +512,67 @@ class Scraper:
                             
                             # Извлекаем doc_id
                             doc_id = None
+                            payload_template = {}
                             try:
                                 req_json = resp.request.post_data_json
-                                if req_json: doc_id = str(req_json.get("doc_id", ""))
+                                if req_json:
+                                    doc_id = str(req_json.get("doc_id", ""))
+                                    for k, v in req_json.items():
+                                        if k in {"variables", "doc_id"}:
+                                            continue
+                                        if isinstance(v, (str, int, float, bool)):
+                                            payload_template[k] = str(v)
                             except: pass
                             
                             if not doc_id and isinstance(req_body, str):
                                 from urllib.parse import parse_qs
                                 params = parse_qs(req_body)
                                 doc_id = params.get("doc_id", [None])[0]
+                                for k, v in params.items():
+                                    if k in {"variables", "doc_id"}:
+                                        continue
+                                    if v:
+                                        payload_template[k] = v[0]
+
+                            request_headers = {}
+                            try:
+                                raw_headers = resp.request.headers or {}
+                                allowed_headers = {
+                                    "accept",
+                                    "accept-language",
+                                    "origin",
+                                    "referer",
+                                    "user-agent",
+                                    "x-asbd-id",
+                                    "x-fb-friendly-name",
+                                    "x-fb-lsd",
+                                    "sec-fetch-site",
+                                    "sec-fetch-mode",
+                                    "sec-fetch-dest",
+                                }
+                                for hk, hv in raw_headers.items():
+                                    lk = str(hk).lower()
+                                    if lk not in allowed_headers:
+                                        continue
+                                    request_headers[str(hk)] = str(hv)
+                            except:
+                                request_headers = {}
+
+                            page_cursor = extract_cursor(data)
+                            has_pagination_shape = bool(raw) or bool(page_cursor)
+                            if vars_ and doc_id and has_pagination_shape:
+                                if str(doc_id) not in fallback_doc_ids:
+                                    fallback_doc_ids.append(str(doc_id))
+                                browser_vars_context = vars_
+                                if payload_template and len(payload_template) > len(fallback_payload_template):
+                                    fallback_payload_template = payload_template
+                                if request_headers and len(request_headers) > len(fallback_request_headers):
+                                    fallback_request_headers = request_headers
+                                if raw:
+                                    fallback_doc_id = doc_id
+                                    fallback_vars = vars_
+                            if not raw:
+                                continue
 
                             # Если этот ответ содержит больше данных или мы еще ничего не нашли
                             if creatives_count > max_creatives or (creatives_count > 0 and not best_page.raw_creatives):
@@ -344,7 +581,10 @@ class Scraper:
                                     cursor=extract_cursor(data), 
                                     raw_creatives=raw, 
                                     variables=vars_,
-                                    doc_id=doc_id
+                                    doc_id=doc_id,
+                                    pagination_doc_ids=[str(doc_id)] if doc_id else [],
+                                    payload_template=payload_template,
+                                    request_headers=request_headers,
                                 )
                                 logger.debug(f"Выбран лучший GQL ответ (креативов: {max_creatives}, doc_id: {doc_id})")
                         except Exception as e:
@@ -376,26 +616,96 @@ class Scraper:
                         if creatives:
                             logger.info(f"Данные успешно извлечены из скриптов HTML для {url} (всего {len(creatives)} креативов)")
                             vars_ = extract_variables(info)
-                            if not vars_ or not (vars_.get("view_all_page_id") or vars_.get("viewAllPageID")):
+                            if not vars_ or not isinstance(vars_, dict):
                                 logger.debug(f"Скрипты не дали переменных для {url}, пробуем URL fallback...")
                                 vars_ = extract_variables(url)
+                            if not vars_:
+                                vars_ = {}
+                            if isinstance(vars_, dict):
+                                url_vars = extract_variables(url)
+                                if not isinstance(url_vars, dict):
+                                    url_vars = {}
+
+                                # Browser-first: use the shape that FB itself sent, then enrich from URL.
+                                if isinstance(browser_vars_context, dict):
+                                    merged_vars = {
+                                        k: v for k, v in browser_vars_context.items()
+                                        if k not in {"cursor", "count", "first", "limit"}
+                                    }
+                                else:
+                                    merged_vars = dict(vars_)
+
+                                for key in (
+                                    "adType",
+                                    "countries",
+                                    "activeStatus",
+                                    "mediaType",
+                                    "searchType",
+                                    "queryString",
+                                    "isTargetedCountry",
+                                    "sortData",
+                                ):
+                                    if key in url_vars and (key not in merged_vars or merged_vars.get(key) in (None, "", [], {})):
+                                        merged_vars[key] = url_vars[key]
+
+                                # Resolve duplicate aliases that can invalidate the GraphQL shape.
+                                if "country" in merged_vars and "countries" in merged_vars:
+                                    merged_vars.pop("countries", None)
+                                if "sessionId" in merged_vars and "sessionID" in merged_vars:
+                                    merged_vars.pop("sessionID", None)
+
+                                vars_ = merged_vars
+                            if (not vars_ or not isinstance(vars_, dict)) and fallback_vars:
+                                vars_ = fallback_vars
+                            if fallback_doc_id:
+                                logger.debug(
+                                    f"Using fallback GQL context from browser request: doc_id={fallback_doc_id}, extra_keys={list(fallback_payload_template.keys())}"
+                                )
+                            elif fallback_payload_template:
+                                logger.debug(
+                                    f"Using browser payload template for pagination with config doc_id. extra_keys={list(fallback_payload_template.keys())}"
+                                )
+                            if fallback_request_headers:
+                                logger.debug(
+                                    f"Using browser request headers for pagination: header_keys={list(fallback_request_headers.keys())}"
+                                )
+                            if fallback_doc_ids:
+                                logger.debug(f"Pagination doc_id candidates from browser: {fallback_doc_ids}")
+                            if isinstance(vars_, dict):
+                                logger.debug(f"Pagination vars prepared from HTML/context: keys={list(vars_.keys())}")
                             
                             return GraphQLPage(
                                 cursor=extract_cursor(info),
                                 raw_creatives=creatives, 
                                 variables=vars_, 
+                                doc_id=fallback_doc_id,
+                                pagination_doc_ids=fallback_doc_ids,
+                                payload_template=fallback_payload_template,
+                                request_headers=fallback_request_headers,
                                 lsd=lsd_token, 
                                 cookies=cookies
                             )
 
                 except Exception as e:
                     logger.warning(f"Попытка инициализации {i+1} для {url} не удалась: {e}")
+                    try:
+                        if not page.is_closed():
+                            await page.close()
+                    except:
+                        pass
+                    page = await browser.new_page()
+                    await page.route("**/*", handle_route)
+                    page.on("response", handle_response)
             
             logger.error(f"Все попытки инициализации для {url} провалены.")
             # Если после всех попыток ничего не нашли, возвращаем пустой объект
             return GraphQLPage()
         finally:
-             await page.close()
+             try:
+                 if not page.is_closed():
+                     await page.close()
+             except:
+                 pass
 
     async def process_creatives(self, client: GraphQLClient, raw_creatives: list) -> List[AdGroup]:
         """Обрабатывает сырые данные объявлений, объединяя их в группы."""
@@ -740,7 +1050,11 @@ async def main(urls: List[str] = None):
                 # Настройка лимитов для предотвращения проблем с сокетами на Windows
                 conn_limit = config.data.scraper.concurrent_requests
                 # Оставляем запас для других запросов
-                limits = httpx.Limits(max_keepalive_connections=conn_limit, max_connections=conn_limit + 10)
+                # With rotating mobile proxies, stale keep-alive tunnels can keep using old external IP.
+                if config.data.scraper.proxy_change_url and scraper.proxy:
+                    limits = httpx.Limits(max_keepalive_connections=0, max_connections=conn_limit + 10)
+                else:
+                    limits = httpx.Limits(max_keepalive_connections=conn_limit, max_connections=conn_limit + 10)
                 
                 async with httpx.AsyncClient(proxy=scraper.proxy, timeout=30, limits=limits, follow_redirects=True) as client:
                     gql = GraphQLClient(
@@ -748,7 +1062,8 @@ async def main(urls: List[str] = None):
                         config.data.facebook_api.endpoint_url, 
                         config.data.facebook_api.doc_ids,
                         cookies=init.cookies,
-                        lsd=init.lsd
+                        lsd=init.lsd,
+                        on_pagination_rate_limit=scraper.handle_pagination_rate_limit,
                     )
                     limit = 50 if config.data.debug_mode else None
                     raw = await gql.fetch_all_creatives(init, limit=limit)

@@ -14,6 +14,8 @@ class ScraperConfig(BaseModel):
     """Конфигурация парсера (Scraper)."""
     concurrent_requests: int = 45
     retries_per_creative: int = 5
+    pagination_retries: int = 8
+    pagination_rate_limit_retries: int = 4
     url_workers: int = 3
     browser_type: str = "chromium"
     scroll_iterations: int = 3

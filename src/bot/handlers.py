@@ -127,7 +127,7 @@ def _extract_ad_library_urls(text: str) -> list[str]:
     candidates: list[str] = []
 
     # 1) Ссылки с протоколом
-    candidates.extend(re.findall(r"https?://\\S+", raw))
+    candidates.extend(re.findall(r"https?://[^\s<>()]+", raw))
     # 2) Ссылки без протокола (facebook.com/ads/library/...)
     candidates.extend([t for t in tokens if "facebook.com/ads/library" in t.lower()])
 
@@ -139,12 +139,35 @@ def _extract_ad_library_urls(text: str) -> list[str]:
             continue
         if not cleaned.lower().startswith("http"):
             cleaned = "https://" + cleaned
+        cleaned = cleaned.replace("&amp;", "&")
         key = cleaned.lower()
         if key in seen:
             continue
         seen.add(key)
         result.append(cleaned)
     return result
+
+
+def _validate_ad_library_url(url: str) -> tuple[bool, str]:
+    """Базовая валидация URL, чтобы отсеять обрезанные ссылки до запуска парсинга."""
+    from urllib.parse import urlparse, parse_qs
+
+    try:
+        parsed = urlparse(url)
+        if "facebook.com" not in parsed.netloc.lower() or "/ads/library/" not in parsed.path.lower():
+            return False, "не похожа на ссылку Facebook Ad Library"
+
+        # Частый симптом обрезки: sort_data[directi... без полного ключа direction]
+        lowered = url.lower()
+        if "sort_data[directi" in lowered and "sort_data[direction]" not in lowered:
+            return False, "ссылка обрезана в параметре sort_data[direction]"
+
+        qs = parse_qs(parsed.query)
+        if not qs:
+            return False, "нет query-параметров"
+        return True, ""
+    except Exception as e:
+        return False, f"ошибка разбора URL: {e}"
 
 @router.message(F.text.contains("facebook.com/ads/library"))
 async def handle_url(message: Message):
@@ -154,6 +177,23 @@ async def handle_url(message: Message):
     if not urls:
         return await message.answer("Не удалось найти корректные ссылки на Facebook Ad Library.")
     
+    valid_urls: list[str] = []
+    invalid_reasons: list[str] = []
+    for u in urls:
+        ok, reason = _validate_ad_library_url(u)
+        if ok:
+            valid_urls.append(u)
+        else:
+            invalid_reasons.append(f"{u} ({reason})")
+
+    if not valid_urls:
+        preview = "\n".join(invalid_reasons[:2])
+        return await message.answer(
+            "Ссылка выглядит некорректной или обрезанной. Отправьте полный URL Facebook Ad Library одной строкой.\n"
+            f"Пример проблемы:\n{preview}"
+        )
+    urls = valid_urls
+
     q_size = queue.qsize()
     count = len(urls)
     initial_text = (

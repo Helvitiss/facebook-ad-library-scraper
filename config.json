@@ -1,9 +1,11 @@
 {
   "debug_mode": false,
   "scraper": {
-    "concurrent_requests": 40,
+    "concurrent_requests": 10,
     "retries_per_creative": 5,
-    "url_workers": 5,
+    "pagination_retries": 8,
+    "pagination_rate_limit_retries": 4,
+    "url_workers": 3,
     "browser_type": "firefox",
     "scroll_iterations": 10,
     "proxy_url": "ENV_VAR",
