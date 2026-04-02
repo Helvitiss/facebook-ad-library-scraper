@@ -23,6 +23,7 @@
 
 ### Требования
 *   **Python 3.11+** (для локального запуска)
+*   **uv** (менеджер зависимостей и окружения)
 *   **Docker & Docker Compose** (рекомендуется)
 *   Токен Telegram бота (от [@BotFather](https://t.me/BotFather))
 
@@ -32,7 +33,7 @@
 
 1.  **Клонируйте репозиторий:**
     ```bash
-    https://github.com/Helvitiss/facebook-ad-library-scraper.git
+    git clone https://github.com/Helvitiss/facebook-ad-library-scraper.git
     cd facebook-ad-library-scraper
     ```
 
@@ -52,32 +53,33 @@
     docker compose up -d --build
     ```
 
-Бот начнет работу. Логи доступны по команде `docker-compose logs -f`. Результаты будут появляться в папке `Exporter_Results`.
+Бот начнет работу. Логи доступны по команде `docker compose logs -f`. Результаты будут появляться в папке `Exporter_Results`.
 
 ---
 
 ### Локальный запуск (Windows/Linux)
 
-1.  **Создайте виртуальное окружение:**
+1.  **Установите `uv`:**
     ```bash
-    python -m venv .venv
-    # Windows
-    .venv\Scripts\activate
-    # Linux/Mac
-    source .venv/bin/activate
+    pip install uv
     ```
 
 2.  **Установите зависимости:**
     ```bash
-    pip install -r requirements.txt
-    playwright install chromium
+    uv sync
+    uv run playwright install chromium
     ```
 
-3.  **Настройте `.env`** (как в пункте Docker).
-
-4.  **Запустите бота:**
+3.  **(Опционально) Установите dev-зависимости для тестов:**
     ```bash
-    python main.py
+    uv sync --group dev
+    ```
+
+4.  **Настройте `.env`** (как в пункте Docker).
+
+5.  **Запустите бота:**
+    ```bash
+    uv run python main.py
     ```
 
 ---
@@ -129,12 +131,13 @@ facebook-ad-library-scraper/
 ├──  Dockerfile             # Инструкции сборки образа
 ├──  docker-compose.yml     # Оркестрация контейнеров
 ├──  main.py                # Точка входа
-└──  requirements.txt       # Зависимости
+├──  pyproject.toml         # Зависимости проекта (uv)
+└──  uv.lock                # Lock-файл зависимостей
 ```
 
 ---
 
-##Использование
+## Использование
 
 1.  Запустите бота и отправьте команду `/start`.
 2.  Отправьте **ссылку** на библиотеку рекламы Facebook (например, `https://www.facebook.com/ads/library/...`).
@@ -166,7 +169,7 @@ facebook-ad-library-scraper/
 
 ---
 
-##Устранение неполадок
+## Устранение неполадок
 
 **Ошибка: `getaddrinfo failed`**
 *   Проверьте интернет-соединение.
@@ -174,23 +177,23 @@ facebook-ad-library-scraper/
 
 **Бот долго запускает парсинг**
 *   Первый запуск требует загрузки модели Whisper (для транскрибации). Это может занять время.
-*   Убедитесь, что `playwright install chromium` выполнен успешно (при локальном запуске).
+*   Убедитесь, что `uv run playwright install chromium` выполнен успешно (при локальном запуске).
 
 **Проблемы с правами в Docker**
 *   Если бот не может создать файлы, проверьте права на папки `Exporter_Results` и `Parser_Results` на хосте. Они должны быть доступны для записи пользователю контейнера.
 
 ---
 
-##Разработка и Тесты
+## Разработка и Тесты
 
 Для запуска тестов используйте `pytest`:
 
 ```bash
-# Установите dev-зависимости (если нет)
-pip install pytest pytest-asyncio
+# Установите dev-зависимости (если еще не установлены)
+uv sync --group dev
 
 # Запуск
-pytest -v
+uv run pytest -v
 ```
 
 Тесты покрывают:

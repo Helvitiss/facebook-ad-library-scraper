@@ -1,6 +1,7 @@
 # Result directories
 Exporter_Results/
 Parser_Results/
+tmp_gql_dumps/
 *.log
 
 # Python

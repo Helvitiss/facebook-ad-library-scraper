@@ -1,0 +1,31 @@
+[project]
+name = "facebook-ad-library-scraper"
+version = "0.1.0"
+description = "Facebook Ad Library parser and Telegram bot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram==3.24.0",
+    "httpx==0.28.1",
+    "loguru==0.7.3",
+    "pydantic==2.12.5",
+    "pydantic-settings==2.0.3",
+    "python-dotenv==1.0.1",
+    "playwright==1.54.0",
+    "beautifulsoup4==4.14.2",
+    "lxml==6.0.2",
+    "geonamescache==3.0.0",
+    "pycountry==24.6.1",
+    "faster-whisper==1.2.0",
+    "deep-translator==1.11.4",
+    "langdetect==1.0.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==7.4.4",
+    "pytest-asyncio==0.23.5",
+]
+
+[tool.uv]
+package = false
