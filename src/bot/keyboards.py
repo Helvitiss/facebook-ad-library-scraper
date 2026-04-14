@@ -105,3 +105,12 @@ def get_edit_value_kb(section: str, key: str):
         [InlineKeyboardButton(text="Очистить (Удалить)", callback_data=f"set_clear:{section}:{key}")],
         [InlineKeyboardButton(text="Отмена", callback_data="cancel_edit")]
     ])
+
+
+def get_skip_task_kb(task_id: str):
+    """Кнопка пропуска текущей задачи парсинга."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Пропустить ссылку", callback_data=f"skip_task:{task_id}")]
+        ]
+    )

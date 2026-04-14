@@ -1,14 +1,15 @@
 import asyncio
 import re
+import uuid
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
 from loguru import logger
 
 from src.core.config import config_instance as config
 from src.bot.utils import process_task, process_kw_task
 from src.bot.settings import router as settings_router, is_user
-from src.bot.keyboards import get_main_settings_kb, get_cancel_kb
+from src.bot.keyboards import get_main_settings_kb, get_cancel_kb, get_skip_task_kb
 from src.bot.states import KWState
 from aiogram.fsm.context import FSMContext
 
@@ -19,15 +20,36 @@ queue = asyncio.Queue()
 worker_tasks: list[asyncio.Task] = []
 worker_limit = 1
 worker_semaphore = asyncio.Semaphore(1)
+cancelled_jobs: set[str] = set()
+running_jobs: dict[str, asyncio.Task] = {}
+
+
+async def _safe_edit_status(message: Message, text: str):
+    try:
+        await message.edit_text(text)
+    except Exception:
+        pass
 
 async def worker():
     """Фоновый воркер, обрабатывающий очередь задач (URL или список URL)."""
     logger.info("Task queue worker started")
     while True:
-        message, status_message, urls = await queue.get()
+        message, status_message, urls, job_id = await queue.get()
         try:
+            if job_id in cancelled_jobs:
+                cancelled_jobs.discard(job_id)
+                await _safe_edit_status(status_message, "Задача пропущена.")
+                continue
+
             async with worker_semaphore:
-                await process_task(message, status_message, urls)
+                task = asyncio.create_task(process_task(message, status_message, urls))
+                running_jobs[job_id] = task
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    await _safe_edit_status(status_message, "Задача остановлена пользователем.")
+                finally:
+                    running_jobs.pop(job_id, None)
         except Exception as e:
             logger.exception(f"Worker process error: {e}")
         finally:
@@ -200,9 +222,34 @@ async def handle_url(message: Message):
         f"Добавлено {count} ссылок в очередь. Перед вами задач: {q_size}" if q_size > 0
         else f"Добавлено {count} ссылок в очередь. Скоро начнем..."
     )
-    status = await message.answer(initial_text)
+    task_id = uuid.uuid4().hex
+    status = await message.answer(initial_text, reply_markup=get_skip_task_kb(task_id))
     
-    await queue.put((message, status, urls))
+    await queue.put((message, status, urls, task_id))
+
+
+@router.callback_query(F.data.startswith("skip_task:"))
+async def cb_skip_task(callback: CallbackQuery):
+    """Пропускает задачу из очереди или останавливает текущую обработку."""
+    if not is_user(callback.from_user.id):
+        return
+
+    task_id = callback.data.split(":", 1)[1]
+    task = running_jobs.get(task_id)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await callback.message.edit_text("Останавливаю задачу...")
+        except Exception:
+            pass
+        return await callback.answer("Останавливаю текущую обработку.")
+
+    cancelled_jobs.add(task_id)
+    try:
+        await callback.message.edit_text("Задача отмечена на пропуск. Будет пропущена в очереди.")
+    except Exception:
+        pass
+    await callback.answer("Задача будет пропущена.")
 
 @router.message(Command("kw"))
 async def cmd_kw(message: Message, state: FSMContext):
