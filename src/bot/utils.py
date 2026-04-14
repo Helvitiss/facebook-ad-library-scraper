@@ -10,9 +10,10 @@ from datetime import datetime
 from collections import defaultdict
 from urllib.parse import urlparse
 import httpx
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup
 from loguru import logger
 
+from src.bot.keyboards import get_skip_task_kb
 from src.core.config import config_instance as config
 from src.core.scraper import main as scraper_main
 from src.core.exporter import main as exporter_main
@@ -135,8 +136,9 @@ def _build_grouped_archives(
 
 class TelegramLogHandler:
     """Перехватчик логов для отправки их в сообщение Telegram (status message)."""
-    def __init__(self, message: Message):
+    def __init__(self, message: Message, reply_markup: InlineKeyboardMarkup | None = None):
         self.message = message
+        self.reply_markup = reply_markup
         self.loop = asyncio.get_running_loop()
         self.last_text = ""
         self.last_level = ""
@@ -231,7 +233,7 @@ class TelegramLogHandler:
             if level:
                 self.last_level = level
             self.pending_text = None
-            await self.message.edit_text(new_text)
+            await self.message.edit_text(new_text, reply_markup=self.reply_markup)
         except aiogram.exceptions.TelegramRetryAfter as e:
             # Если словили флуд-контроль, увеличиваем задержку
             self.cooldown = e.retry_after + 1.0
@@ -260,7 +262,7 @@ async def get_final_domain(url: str) -> str:
         except:
             return url
 
-async def process_task(original_message: Message, status_message: Message, url_or_urls):
+async def process_task(original_message: Message, status_message: Message, url_or_urls, task_id: str | None = None):
     """
     Основной воркер процесса:
     1. Запуск парсинга (scraper).
@@ -268,38 +270,43 @@ async def process_task(original_message: Message, status_message: Message, url_o
     3. Сбор статистики и упаковка результатов в ZIP.
     4. Отправка архива пользователю.
     """
-    tg_handler = TelegramLogHandler(status_message)
+    status_kb = get_skip_task_kb(task_id) if task_id else None
+
+    async def edit_status(text: str):
+        await status_message.edit_text(text, reply_markup=status_kb)
+
+    tg_handler = TelegramLogHandler(status_message, reply_markup=status_kb)
     sink_id = logger.add(tg_handler.write, format="{level} | {message}", level="INFO", filter=lambda r: "aiogram" not in r["name"])
     
     try:
         urls = list(url_or_urls) if isinstance(url_or_urls, (list, tuple)) else [url_or_urls]
         urls = [u for u in urls if u]
         if not urls:
-            return await status_message.edit_text("Не удалось прочитать ссылки для обработки.")
+            return await edit_status("Не удалось прочитать ссылки для обработки.")
 
         count = len(urls)
         url_label = urls[0] if count == 1 else f"{count} urls"
-        await status_message.edit_text(f"Сбор данных... ({count} ссылок)")
+        await edit_status(f"Сбор данных... ({count} ссылок)")
         res_dir = await scraper_main(urls)
         
         if not res_dir:
             logger.warning(f"Парсер вернул пустой результат для {url_label}")
-            return await status_message.edit_text("Парсер не смог найти данные по этой ссылке. Возможно, поиск не дал результатов или доступ заблокирован.")
+            return await edit_status("Парсер не смог найти данные по этой ссылке. Возможно, поиск не дал результатов или доступ заблокирован.")
 
         if config.data.debug_mode:
-            await status_message.edit_text("Отладка RSOC: формирую результат...")
+            await edit_status("Отладка RSOC: формирую результат...")
 
             grouped = _collect_rsoc_by_link(Path(res_dir))
             grouped = {link: kws for link, kws in grouped.items() if kws}
 
             if not grouped:
-                return await status_message.edit_text("Debug RSOC: ключи не найдены.")
+                return await edit_status("Debug RSOC: ключи не найдены.")
 
             report_text = _format_rsoc_by_link(grouped)
             report_path = Path(res_dir) / f"debug_rsoc_{int(time.time())}.txt"
             report_path.write_text(report_text, encoding="utf-8")
 
-            await status_message.edit_text(
+            await edit_status(
                 f"Debug RSOC: найдено {sum(len(v) for v in grouped.values())} ключей в {len(grouped)} ссылках. Отправляю TXT-файл..."
             )
             await original_message.answer_document(
@@ -308,19 +315,19 @@ async def process_task(original_message: Message, status_message: Message, url_o
             )
             return
 
-        await status_message.edit_text("Загрузка медиа...")
+        await edit_status("Загрузка медиа...")
         await exporter_main(res_dir)
 
-        await status_message.edit_text("Упаковка...")
+        await edit_status("Упаковка...")
         exp_base = Path(__file__).resolve().parent.parent.parent / config.data.exporter.results_base_dir
         subdirs = [d for d in exp_base.iterdir() if d.is_dir()]
         
         if not subdirs:
-             return await status_message.edit_text("Ошибка экспорта (нет папок).")
+             return await edit_status("Ошибка экспорта (нет папок).")
         
         latest = max(subdirs, key=lambda d: d.stat().st_mtime)
         if not latest.exists():
-            return await status_message.edit_text("Ошибка экспорта (папка результатов не найдена).")
+            return await edit_status("Ошибка экспорта (папка результатов не найдена).")
         domain_stats = defaultdict(lambda: {"reach": 0, "spend": 0.0})
         
         for folder in latest.iterdir():
@@ -361,7 +368,7 @@ async def process_task(original_message: Message, status_message: Message, url_o
         shutil.make_archive(zip_name, 'zip', latest)
         zip_file = zip_name + ".zip"
 
-        await status_message.edit_text("Отправка...")
+        await edit_status("Отправка...")
         
         summary_lines = ["Результаты обработки:\n"]
         total_reach = 0
@@ -394,7 +401,7 @@ async def process_task(original_message: Message, status_message: Message, url_o
             )
         except aiogram.exceptions.TelegramEntityTooLarge:
             logger.warning(f"Архив слишком большой для Telegram: {zip_file}")
-            await status_message.edit_text("Архив слишком большой, делю результат на несколько ZIP по группам ссылок...")
+            await edit_status("Архив слишком большой, делю результат на несколько ZIP по группам ссылок...")
 
             zip_path = Path(zip_file)
             grouped_archives = _build_grouped_archives(latest, zip_name)

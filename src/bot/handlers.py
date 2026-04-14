@@ -42,7 +42,7 @@ async def worker():
                 continue
 
             async with worker_semaphore:
-                task = asyncio.create_task(process_task(message, status_message, urls))
+                task = asyncio.create_task(process_task(message, status_message, urls, task_id=job_id))
                 running_jobs[job_id] = task
                 try:
                     await task
