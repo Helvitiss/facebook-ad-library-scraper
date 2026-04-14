@@ -167,6 +167,13 @@ class RSOCExtractor:
         except Exception:
             return False
 
+    def _is_noisy_html_domain(self, url: str) -> bool:
+        try:
+            host = urlparse(url).netloc.lower()
+            return any(host == d or host.endswith(f".{d}") for d in self.NOISY_HTML_DOMAINS)
+        except Exception:
+            return False
+
     def _is_noise_keyword(self, keyword: str) -> bool:
         if not keyword or not isinstance(keyword, str):
             return True
@@ -557,6 +564,20 @@ class RSOCExtractor:
                 results.extend(self._split_keywords(raw, vetted=True))
         return results
 
+    def _extract_primary_query_terms_from_url(self, url: str) -> list[str]:
+        try:
+            params = parse_qs(urlparse(url).query)
+        except Exception:
+            return []
+
+        results: list[str] = []
+        for key in ("q", "search", "search_term", "search_terms"):
+            for raw in params.get(key, []):
+                if not raw:
+                    continue
+                results.extend(self._split_keywords(raw, vetted=True))
+        return results
+
     def _extract_explicit_terms_from_html(self, html: Optional[str]) -> list[str]:
         if not html:
             return []
@@ -613,6 +634,25 @@ class RSOCExtractor:
             if low not in seen:
                 seen.add(low)
                 unique_results.append(kw)
+        return unique_results
+
+    def _finalize_forcekey_keywords(self, keywords: list[str]) -> list[str]:
+        """Finalize forceKey terms with minimal filtering.
+
+        forceKey* parameters are explicit intent signals from the source URL and
+        may legitimately end with single-letter tokens (e.g. "Exact Term A").
+        """
+        unique_results: list[str] = []
+        seen: set[str] = set()
+        for kw in keywords:
+            normalized = self._normalize_candidate(kw)
+            if not normalized:
+                continue
+            low = normalized.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            unique_results.append(normalized)
         return unique_results
 
     async def process_link(self, url: str, http_client: Optional[httpx.AsyncClient] = None) -> list[str]:
@@ -673,29 +713,39 @@ class RSOCExtractor:
             logger.warning(f"RSOC: Ошибка доступа/обработки ссылки {url} ({type(e).__name__}): {e}")
         
         effective_url = final_url or url
+        allow_html_sources = (not started_from_tracker) and (not self._skip_html_for_domain(effective_url))
 
-        # Приоритет 1: явные terms-массивы (query/html). Если есть — считаем их окончательными.
-        explicit_terms = []
-        explicit_terms.extend(self._extract_explicit_terms_from_url(url))
-        explicit_terms.extend(self._extract_explicit_terms_from_url(effective_url))
-        explicit_terms.extend(self._extract_explicit_terms_from_html(html_content))
-        explicit_terms = self._finalize_keywords(explicit_terms)
-        if explicit_terms:
-            return explicit_terms
-
-        # Приоритет 2: forceKey* параметры. Если есть — не смешиваем с другими источниками.
+        # Приоритет 1: forceKey* параметры. Если есть — не смешиваем с другими источниками.
         forcekey_terms = []
         forcekey_terms.extend(self._extract_forcekey_terms_from_url(url))
         forcekey_terms.extend(self._extract_forcekey_terms_from_url(effective_url))
-        forcekey_terms = self._finalize_keywords(forcekey_terms)
+        forcekey_terms = self._finalize_forcekey_keywords(forcekey_terms)
         if forcekey_terms:
             return forcekey_terms
+
+        # Приоритет 2: явные terms-массивы (query/html). Если есть — считаем их окончательными.
+        explicit_terms = []
+        explicit_terms.extend(self._extract_explicit_terms_from_url(url))
+        explicit_terms.extend(self._extract_explicit_terms_from_url(effective_url))
+        if allow_html_sources:
+            explicit_terms.extend(self._extract_explicit_terms_from_html(html_content))
+
+            # Для noisy-доменов добавляем базовый query intent (q/search), чтобы не терять
+            # исходный пользовательский запрос при наличии query_terms в HTML.
+            if self._is_noisy_html_domain(effective_url):
+                explicit_terms.extend(self._extract_primary_query_terms_from_url(url))
+                explicit_terms.extend(self._extract_primary_query_terms_from_url(effective_url))
+
+        explicit_terms = self._finalize_keywords(explicit_terms)
+        if explicit_terms:
+            return explicit_terms
 
         context_tokens = self._extract_query_context_tokens(effective_url)
         apply_context_filter = self._should_apply_context_filter(effective_url) and bool(context_tokens)
         trusted_terms = self._extract_trusted_terms_from_url(effective_url)
         trusted_terms.update(self._extract_trusted_terms_from_url(url))
-        trusted_terms.update(self._extract_trusted_terms_from_html(html_content))
+        if allow_html_sources:
+            trusted_terms.update(self._extract_trusted_terms_from_html(html_content))
 
         filtered = []
         for kw in all_keywords:

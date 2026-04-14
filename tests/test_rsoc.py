@@ -468,6 +468,41 @@ def test_process_link_extracts_const_terms_string_as_explicit_source(extractor):
     ]
 
 
+def test_process_link_extracts_head_meta_keywords_for_mindgenpro_case(extractor):
+    url = (
+        "https://www.mindgenpro.com/dsr?ad_id=%7B%7Bad.id%7D%7D&asid=a1_ch343&clid=%7Bfbclid%7D"
+        "&ctid=krd-8fda1c5c&de=m&pub=fb&q=Intimate%20Starter%20Kit"
+        "&rac=Get%20Insights%20On%20Intimate%20Starter%20Kit&terms=&tv=dark&locale=en_US"
+    )
+
+    class Resp:
+        def __init__(self):
+            self.url = url
+            self.history = []
+            self.text = (
+                "<html><head>"
+                '<meta name="keywords" content="intimate starter kit, sexual wellness, '
+                'consent, toy care, safer sex, lube, condoms, storage">'
+                "</head><body></body></html>"
+            )
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, _url, headers=None):
+            return Resp()
+
+    kws = asyncio.run(extractor.process_link(url, http_client=Client()))
+    assert "intimate starter kit" in kws
+    assert "sexual wellness" in kws
+    assert "consent" in kws
+    assert "toy care" in kws
+    assert "safer sex" in kws
+    assert "condoms" in kws
+    assert "storage" in kws
+
+
 def test_process_link_extracts_upper_terms_config_as_explicit_source(extractor):
     class Resp:
         def __init__(self):
