@@ -148,12 +148,10 @@ class TelegramLogHandler:
         self.error_sticky_seconds = 12.0
         self.info_allowlist = [
             "Сбор данных",
-            "Загрузка и транскрибация",
+            "Загрузка медиа",
             "Упаковка",
             "Отправка",
             "Экспорт завершен",
-            "Начало транскрибации",
-            "Транскрибация",
             "Обработка",
             "Данные успешно",
             "Парсер не смог",
@@ -266,7 +264,7 @@ async def process_task(original_message: Message, status_message: Message, url_o
     """
     Основной воркер процесса:
     1. Запуск парсинга (scraper).
-    2. Экспорт и транскрибация (exporter).
+    2. Экспорт данных (exporter).
     3. Сбор статистики и упаковка результатов в ZIP.
     4. Отправка архива пользователю.
     """
@@ -310,7 +308,7 @@ async def process_task(original_message: Message, status_message: Message, url_o
             )
             return
 
-        await status_message.edit_text("Загрузка и транскрибация...")
+        await status_message.edit_text("Загрузка медиа...")
         await exporter_main(res_dir)
 
         await status_message.edit_text("Упаковка...")

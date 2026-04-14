@@ -16,7 +16,6 @@ dependencies = [
     "lxml==6.0.2",
     "geonamescache==3.0.0",
     "pycountry==24.6.1",
-    "faster-whisper==1.2.0",
     "deep-translator==1.11.4",
     "langdetect==1.0.9",
 ]

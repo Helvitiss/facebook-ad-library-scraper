@@ -27,7 +27,6 @@ class ExporterConfig(BaseModel):
     max_retries: int = 5
     exporter_workers: int = 20
     details_filename: str = "Details.txt"
-    transcription_filename: str = "Transcription.txt"
     video_filename: str = "Creative.mp4"
     image_filename: str = "Creative.jpg"
     results_base_dir: str = "Exporter_Results"
@@ -35,15 +34,6 @@ class ExporterConfig(BaseModel):
     min_reaches: int = 0
     min_reaches_eu: int = 0
     min_reaches_uk: int = 0
-    whisper_model: str = "base"
-    whisper_device: str = "cpu"
-    whisper_compute_type: str = "int8"
-    transcription_beam_size: int = 1
-    transcription_best_of: int = 1
-    transcription_patience: float = 1.0
-    transcription_vad_filter: bool = True
-    transcription_condition_on_previous_text: bool = False
-    transcription_temperature: float = 0.0
 
 class FacebookApiConfig(BaseModel):
     """Настройки доступа к API Facebook."""

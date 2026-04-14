@@ -3,7 +3,6 @@ FROM python:3.11-slim-bookworm
 
 # Установка базовых системных зависимостей
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
     shadowsocks-libev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -19,9 +18,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Установка Playwright и системных зависимостей для браузеров (Chromium и Firefox)
 RUN uv run playwright install --with-deps chromium firefox
-
-# Предварительная загрузка модели Whisper (base модель, вшиваем в образ)
-RUN uv run python -c 'from faster_whisper import WhisperModel; WhisperModel("base", device="cpu", compute_type="int8", download_root="/app/models/whisper")'
 
 # Копирование остального кода приложения
 COPY . .
