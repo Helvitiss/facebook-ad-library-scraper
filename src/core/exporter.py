@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+from urllib.parse import urlparse
 from deep_translator import GoogleTranslator
 from langdetect import DetectorFactory, detect
 from loguru import logger
@@ -279,9 +280,44 @@ class Exporter:
                             f.write(chunk)
                 return
             except Exception as e:
+                if self._is_fbcdn_hostname_mismatch(url, e):
+                    logger.warning(
+                        f"SSL hostname mismatch for {urlparse(url).netloc}; retrying {path.name} without TLS verification"
+                    )
+                    if self._download_without_verify(url, path):
+                        return
                 logger.warning(f"Download error {path.name} (attempt {i + 1}): {e}")
                 if i < config.data.exporter.max_retries - 1:
                     time.sleep(config.data.exporter.retry_delay_seconds)
+
+    def _is_fbcdn_hostname_mismatch(self, url: str, err: Exception) -> bool:
+        host = (urlparse(url).hostname or "").lower()
+        if "fbcdn.net" not in host:
+            return False
+
+        msg = str(err)
+        ssl_markers = (
+            "CERTIFICATE_VERIFY_FAILED",
+            "Hostname mismatch",
+            "certificate verify failed",
+            "not valid for",
+        )
+        return any(marker in msg for marker in ssl_markers)
+
+    def _download_without_verify(self, url: str, path: Path) -> bool:
+        proxy = config.data.scraper.proxy_url or None
+        with httpx.Client(
+            follow_redirects=True,
+            timeout=30,
+            proxy=proxy,
+            verify=False,
+        ) as insecure_client:
+            with insecure_client.stream("GET", url) as response:
+                response.raise_for_status()
+                with open(path, "wb") as f:
+                    for chunk in response.iter_bytes():
+                        f.write(chunk)
+        return True
 
     def _get_folder_name(self, reaches: dict, texts: list[str]) -> str:
         """Generate folder name from ad text and aggregated reaches."""
