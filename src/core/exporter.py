@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 from deep_translator import GoogleTranslator
@@ -28,6 +29,7 @@ class Exporter:
     def __init__(self):
         self.results_dir: Optional[Path] = None
         self.http_client: Optional[httpx.Client] = None
+        self.insecure_http_client: Optional[httpx.Client] = None
         self.folder_lock = threading.Lock()
         try:
             detect("")
@@ -105,8 +107,15 @@ class Exporter:
                     timeout=30,
                     proxy=proxy,
                     limits=limits,
-                ) as client:
+                ) as client, httpx.Client(
+                    follow_redirects=True,
+                    timeout=30,
+                    proxy=proxy,
+                    limits=limits,
+                    verify=False,
+                ) as insecure_client:
                     self.http_client = client
+                    self.insecure_http_client = insecure_client
                     with ThreadPoolExecutor(
                         max_workers=config.data.exporter.exporter_workers
                     ) as executor:
@@ -272,16 +281,57 @@ class Exporter:
         """Download a file with retries."""
         for i in range(config.data.exporter.max_retries):
             try:
-                with self.http_client.stream("GET", url) as response:
-                    response.raise_for_status()
-                    with open(path, "wb") as f:
-                        for chunk in response.iter_bytes():
-                            f.write(chunk)
+                self._download_with_client(self.http_client, url, path)
                 return
             except Exception as e:
+                if self._is_fbcdn_ssl_hostname_error(e, url):
+                    try:
+                        logger.warning(
+                            f"Facebook CDN SSL hostname mismatch for {path.name}; "
+                            "retrying this file without certificate verification"
+                        )
+                        self._download_with_client(self.insecure_http_client, url, path)
+                        return
+                    except Exception as fallback_error:
+                        e = fallback_error
+
                 logger.warning(f"Download error {path.name} (attempt {i + 1}): {e}")
                 if i < config.data.exporter.max_retries - 1:
                     time.sleep(config.data.exporter.retry_delay_seconds)
+
+    def _download_with_client(self, client: httpx.Client | None, url: str, path: Path):
+        """Download a file through a specific HTTP client."""
+        if client is None:
+            raise RuntimeError("HTTP client is not initialized")
+
+        tmp_path = path.with_name(f"{path.name}.part")
+        try:
+            with client.stream("GET", url) as response:
+                response.raise_for_status()
+                with open(tmp_path, "wb") as f:
+                    for chunk in response.iter_bytes():
+                        f.write(chunk)
+            tmp_path.replace(path)
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
+
+    @staticmethod
+    def _is_fbcdn_ssl_hostname_error(exc: Exception, url: str) -> bool:
+        """Detect Facebook CDN certificate host mismatches for a narrow retry path."""
+        host = urlparse(url).hostname or ""
+        if host != "fbcdn.net" and not host.endswith(".fbcdn.net"):
+            return False
+
+        message = str(exc).lower()
+        return (
+            "certificate_verify_failed" in message
+            or "certificate verify failed" in message
+        ) and (
+            "hostname mismatch" in message
+            or "not valid for" in message
+        )
 
     def _get_folder_name(self, reaches: dict, texts: list[str]) -> str:
         """Generate folder name from ad text and aggregated reaches."""
