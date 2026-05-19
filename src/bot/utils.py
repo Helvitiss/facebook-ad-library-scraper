@@ -24,6 +24,40 @@ import aiogram.exceptions
 TELEGRAM_MAX_FILE_SIZE = 49 * 1024 * 1024
 
 
+
+def _split_message_chunks(text: str, max_length: int = 4000) -> list[str]:
+    """Разбивает длинный текст на части в пределах лимита Telegram."""
+    if len(text) <= max_length:
+        return [text]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in text.splitlines(keepends=True):
+        line_len = len(line)
+        if line_len > max_length:
+            if current:
+                chunks.append("".join(current).rstrip())
+                current, current_len = [], 0
+            start = 0
+            while start < line_len:
+                chunks.append(line[start:start + max_length].rstrip())
+                start += max_length
+            continue
+
+        if current_len + line_len > max_length:
+            chunks.append("".join(current).rstrip())
+            current, current_len = [], 0
+
+        current.append(line)
+        current_len += line_len
+
+    if current:
+        chunks.append("".join(current).rstrip())
+
+    return [chunk for chunk in chunks if chunk]
+
 def _collect_rsoc_by_link(result_dir: Path) -> dict[str, list[str]]:
     """Собирает RSOC-ключи из JSON-дампов в разрезе link_url."""
     per_link: dict[str, list[str]] = {}
@@ -388,7 +422,8 @@ async def process_task(original_message: Message, status_message: Message, url_o
         caption = "\n".join(summary_lines)
         
         if len(caption) > 1024:
-            await original_message.answer(caption, parse_mode="HTML")
+            for chunk in _split_message_chunks(caption):
+                await original_message.answer(chunk, parse_mode="HTML")
             caption = f"Результаты обработки\nTotal Spend: ${total_spend:.2f}\nTotal Reaches: {total_reach:,}"
         
         generated_files = [Path(zip_file)]
